@@ -351,6 +351,8 @@ def bot_activity(bot_id: int, user: User = Depends(current_user), db: Session = 
         .limit(30)
     ).all()
     labels = {"added": "ربط البوت", "settings_updated": "تحديث الإعدادات"}
+    if not entries:
+        return [{"id": 0, "action": "ربط البوت", "details": "تاريخ الربط المسجل في المنصة", "created_at": bot.created_at}]
     return [{"id": item.id, "action": labels.get(item.action, item.action), "details": item.details, "created_at": item.created_at} for item in entries]
 
 
