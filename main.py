@@ -879,10 +879,7 @@ async def process_telegram_update(update: dict):
         if not text_value:
             return
         if text_value.startswith("/start") or text_value.startswith("/panel"):
-            if sender_id == settings.owner_id:
-                await telegram_send(chat_id, "🛡️ أهلاً بك في لوحة مطوّر Bot Center\nاختر القسم الذي تريد إدارته:", owner_panel_keyboard())
-            else:
-                await telegram_send(chat_id, "أهلاً بك في Bot Center 🤖\nلإدارة بوتاتك واشتراكاتك افتح تطبيق المنصة من زر القائمة.")
+            await telegram_send(chat_id, "أهلاً بك في Bot Center 🤖\nلإدارة بوتاتك واشتراكاتك افتح تطبيق المنصة من زر القائمة.")
             return
 
         state_key = f"tg_state_{sender_id}"
