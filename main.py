@@ -278,6 +278,9 @@ def delete_bot(bot_id: int, user: User = Depends(current_user), db: Session = De
 
 @app.post("/api/payments")
 def create_payment(payload: PaymentCreate, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    enabled = db.get(PlatformSetting, f"payment_{payload.method}_enabled")
+    if not enabled or enabled.value.lower() != "true":
+        raise HTTPException(400, "طريقة الدفع غير متاحة حالياً")
     request = PaymentRequest(
         user_id=user.telegram_id,
         method=payload.method,
