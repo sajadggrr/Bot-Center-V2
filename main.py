@@ -267,7 +267,7 @@ def add_bot(payload: BotCreate, user: User = Depends(current_user), db: Session 
     if not data.get("ok"):
         raise HTTPException(400, "Telegram rejected this bot token")
     username = data["result"].get("username") or "unknown"
-    exists = db.scalar(select(ManagedBot).where(ManagedBot.bot_username == username))
+    exists = db.scalar(select(ManagedBot).where(ManagedBot.owner_id == user.telegram_id, ManagedBot.bot_username == username))
     if exists:
         raise HTTPException(409, "This bot is already connected")
     record = ManagedBot(
@@ -284,7 +284,7 @@ def add_bot(payload: BotCreate, user: User = Depends(current_user), db: Session 
 @app.get("/api/bots")
 def list_bots(user: User = Depends(current_user), db: Session = Depends(get_db)):
     bots = db.scalars(select(ManagedBot).where(ManagedBot.owner_id == user.telegram_id)).all()
-    return [{"id": b.id, "username": b.bot_username, "created_at": b.created_at} for b in bots]
+    return [{"id": b.id, "username": b.bot_username, "created_at": b.created_at, "mode": "external_token", "status": "connected_only"} for b in bots]
 
 
 @app.delete("/api/bots/{bot_id}")
