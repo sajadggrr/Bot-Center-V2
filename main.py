@@ -901,6 +901,10 @@ async def process_telegram_update(update: dict):
             token = text_value
             if len(token) < 20 or len(token) > 256 or ":" not in token:
                 await telegram_send(chat_id, "❌ صيغة التوكن غير صحيحة. أرسل توكن BotFather الصحيح أو /cancel للإلغاء.")
+                try:
+                    await telegram_call("deleteMessage", {"chat_id": chat_id, "message_id": message.get("message_id")})
+                except Exception:
+                    pass
                 return
             try:
                 import httpx
@@ -909,6 +913,10 @@ async def process_telegram_update(update: dict):
                     result = response.json()
                 if not result.get("ok"):
                     await telegram_send(chat_id, "❌ تيليجرام رفض التوكن. تأكد منه ثم أرسله مرة أخرى.")
+                    try:
+                        await telegram_call("deleteMessage", {"chat_id": chat_id, "message_id": message.get("message_id")})
+                    except Exception:
+                        pass
                     return
                 username = result["result"].get("username") or "unknown"
                 existing = db.scalar(select(ManagedBot).where(
@@ -930,13 +938,6 @@ async def process_telegram_update(update: dict):
             except Exception:
                 await telegram_send(chat_id, "تعذر التحقق من التوكن حالياً. حاول مرة أخرى لاحقاً.")
             return
-        if sender_id == settings.owner_id and text_value == "/cancel":
-            state_key = f"tg_state_{sender_id}"
-            state = db.get(PlatformSetting, state_key)
-            if state:
-                db.delete(state)
-                db.commit()
-            await telegram_send(chat_id, "تم إلغاء العملية.", owner_panel_keyboard())
     finally:
         db.close()
 
