@@ -589,7 +589,7 @@ async def subscription_reminders(
     now = int(time.time())
     candidates = db.scalars(
         select(Subscription).where(
-            Subscription.status == "active",
+            Subscription.status.in_(["active", "expired"]),
             Subscription.expires_at.is_not(None),
         )
     ).all()
@@ -607,19 +607,20 @@ async def subscription_reminders(
                 if subscription.expired_notice_sent:
                     continue
                 notice = (
-                    "⛔ انتهى اشتراكك في Bot Center\\n\\n"
-                    f"💎 الخطة: {subscription.plan_name}\\n"
+                    "⛔ انتهى اشتراكك في Bot Center\n\n"
+                    f"💎 الخطة: {subscription.plan_name}\n"
                     "يمكنك تقديم طلب تجديد من داخل المنصة."
                 )
                 subscription.status = "expired"
                 endpoint_flag = "expired_notice_sent"
             elif expiry <= now + 3 * 86400 and not subscription.reminder_3d_sent:
-                from datetime import datetime, timezone
-                expiry_text = datetime.fromtimestamp(expiry, timezone.utc).strftime("%Y-%m-%d")
+                from datetime import datetime
+                from zoneinfo import ZoneInfo
+                expiry_text = datetime.fromtimestamp(expiry, ZoneInfo("Asia/Baghdad")).strftime("%Y-%m-%d")
                 notice = (
-                    "🔔 تذكير: اشتراكك في Bot Center سينتهي خلال 3 أيام\\n\\n"
-                    f"💎 الخطة: {subscription.plan_name}\\n"
-                    f"🗓️ تاريخ الانتهاء: {expiry_text}\\n"
+                    "🔔 تذكير: اشتراكك في Bot Center سينتهي خلال 3 أيام\n\n"
+                    f"💎 الخطة: {subscription.plan_name}\n"
+                    f"🗓️ تاريخ الانتهاء: {expiry_text}\n"
                     "جدد اشتراكك قبل انتهائه للاستمرار باستخدام المزايا."
                 )
                 endpoint_flag = "reminder_3d_sent"
