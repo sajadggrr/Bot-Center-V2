@@ -59,6 +59,8 @@ class ManagedBot(Base):
     owner_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("users.telegram_id"), index=True)
     bot_username: Mapped[str] = mapped_column(String(64))
     token_encrypted: Mapped[str] = mapped_column(Text)
+    display_name: Mapped[str] = mapped_column(String(80), default="", nullable=False)
+    notes: Mapped[str] = mapped_column(Text, default="", nullable=False)
     created_at: Mapped[int] = mapped_column(Integer, default=lambda: int(time.time()))
 
 
@@ -133,6 +135,26 @@ elif engine.dialect.name == "sqlite":
             conn.execute(text("ALTER TABLE subscriptions ADD COLUMN reminder_3d_sent BOOLEAN NOT NULL DEFAULT 0"))
         if "expired_notice_sent" not in columns:
             conn.execute(text("ALTER TABLE subscriptions ADD COLUMN expired_notice_sent BOOLEAN NOT NULL DEFAULT 0"))
+
+
+# Add editable per-bot metadata to existing installations.
+if engine.dialect.name == "postgresql":
+    with engine.begin() as conn:
+        columns = {row[0] for row in conn.execute(text("""
+            SELECT column_name FROM information_schema.columns
+            WHERE table_schema = current_schema() AND table_name = 'managed_bots'
+        """)).all()}
+        if "display_name" not in columns:
+            conn.execute(text("ALTER TABLE managed_bots ADD COLUMN display_name VARCHAR(80) NOT NULL DEFAULT ''"))
+        if "notes" not in columns:
+            conn.execute(text("ALTER TABLE managed_bots ADD COLUMN notes TEXT NOT NULL DEFAULT ''"))
+elif engine.dialect.name == "sqlite":
+    with engine.begin() as conn:
+        columns = {row[1] for row in conn.execute(text("PRAGMA table_info(managed_bots)")).all()}
+        if "display_name" not in columns:
+            conn.execute(text("ALTER TABLE managed_bots ADD COLUMN display_name VARCHAR(80) NOT NULL DEFAULT ''"))
+        if "notes" not in columns:
+            conn.execute(text("ALTER TABLE managed_bots ADD COLUMN notes TEXT NOT NULL DEFAULT ''"))
 
 
 app = FastAPI(title=settings.app_name, version="2.0.0")
@@ -212,6 +234,11 @@ class BotCreate(BaseModel):
     token: str = Field(min_length=20, max_length=256)
 
 
+class BotSettingsUpdate(BaseModel):
+    display_name: str = Field(default="", max_length=80)
+    notes: str = Field(default="", max_length=1000)
+
+
 class PaymentCreate(BaseModel):
     method: str = Field(pattern="^(stars|asiacell|bank_transfer|card)$")
     amount: str = Field(min_length=1, max_length=32)
@@ -284,7 +311,18 @@ def add_bot(payload: BotCreate, user: User = Depends(current_user), db: Session 
 @app.get("/api/bots")
 def list_bots(user: User = Depends(current_user), db: Session = Depends(get_db)):
     bots = db.scalars(select(ManagedBot).where(ManagedBot.owner_id == user.telegram_id)).all()
-    return [{"id": b.id, "username": b.bot_username, "created_at": b.created_at, "mode": "external_token", "status": "connected_only"} for b in bots]
+    return [{"id": b.id, "username": b.bot_username, "display_name": b.display_name or "", "notes": b.notes or "", "created_at": b.created_at, "mode": "external_token", "status": "connected_only"} for b in bots]
+
+
+@app.put("/api/bots/{bot_id}")
+def update_bot_settings(bot_id: int, payload: BotSettingsUpdate, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    bot = db.scalar(select(ManagedBot).where(ManagedBot.id == bot_id, ManagedBot.owner_id == user.telegram_id))
+    if not bot:
+        raise HTTPException(404, "Bot not found")
+    bot.display_name = payload.display_name.strip()
+    bot.notes = payload.notes.strip()
+    db.commit()
+    return {"saved": True, "id": bot.id, "display_name": bot.display_name, "notes": bot.notes}
 
 
 @app.delete("/api/bots/{bot_id}")
