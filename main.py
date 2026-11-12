@@ -416,16 +416,16 @@ async def admin_payment_decision(payment_id: int, payload: PaymentDecision, user
             from datetime import datetime, timezone
             expiry_text = datetime.fromtimestamp(expires_at, timezone.utc).strftime('%Y-%m-%d')
             user_notice = (
-                "🎉 تم تفعيل اشتراكك في Bot Center بنجاح!\\n\\n"
-                f"💎 الخطة: {payload.plan_name}\\n"
-                f"📅 مدة الاشتراك: {payload.duration_days} يوم\\n"
-                f"🗓️ تاريخ الانتهاء: {expiry_text}\\n\\n"
+                "🎉 تم تفعيل اشتراكك في Bot Center بنجاح!\n\n"
+                f"💎 الخطة: {payload.plan_name}\n"
+                f"📅 مدة الاشتراك: {payload.duration_days} يوم\n"
+                f"🗓️ تاريخ الانتهاء: {expiry_text}\n\n"
                 "شكراً لثقتك بنا ❤️"
             )
         else:
             user_notice = (
-                "❌ نعتذر، تم رفض طلب الاشتراك في Bot Center.\\n\\n"
-                f"🧾 رقم الطلب: #{payment.id}\\n"
+                "❌ نعتذر، تم رفض طلب الاشتراك في Bot Center.\n\n"
+                f"🧾 رقم الطلب: #{payment.id}\n"
                 "يمكنك مراجعة بيانات الدفع والتواصل مع الدعم إذا كنت تعتقد أن هذا خطأ."
             )
         try:
