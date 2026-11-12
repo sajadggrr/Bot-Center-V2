@@ -385,17 +385,68 @@ def admin_payments(user: User = Depends(current_user), db: Session = Depends(get
     return [{'id': p.id, 'user_id': p.user_id, 'method': p.method, 'amount': p.amount, 'reference': p.reference, 'status': p.status, 'created_at': p.created_at} for p in rows]
 
 @app.post('/api/admin/payments/{payment_id}/decision')
-def admin_payment_decision(payment_id: int, payload: PaymentDecision, user: User = Depends(current_user), db: Session = Depends(get_db)):
+async def admin_payment_decision(payment_id: int, payload: PaymentDecision, user: User = Depends(current_user), db: Session = Depends(get_db)):
     require_owner(user)
     payment = db.get(PaymentRequest, payment_id)
-    if not payment: raise HTTPException(404, 'Payment not found')
-    if payment.status != 'pending': raise HTTPException(409, 'Already reviewed')
+    if not payment:
+        raise HTTPException(404, 'Payment not found')
+    if payment.status != 'pending':
+        raise HTTPException(409, 'Already reviewed')
+
+    now = int(time.time())
+    expires_at = None
     if payload.approve:
         payment.status = 'approved'
-        db.add(Subscription(user_id=payment.user_id, plan_name=payload.plan_name, status='active', expires_at=int(time.time()) + payload.duration_days * 86400))
-    else: payment.status = 'rejected'
+        expires_at = now + payload.duration_days * 86400
+        db.add(Subscription(
+            user_id=payment.user_id,
+            plan_name=payload.plan_name,
+            status='active',
+            expires_at=expires_at,
+        ))
+    else:
+        payment.status = 'rejected'
     db.commit()
-    return {'id': payment.id, 'status': payment.status}
+
+    notification_sent = False
+    notification_error = None
+    if settings.telegram_bot_token:
+        import httpx
+        if payload.approve:
+            from datetime import datetime, timezone
+            expiry_text = datetime.fromtimestamp(expires_at, timezone.utc).strftime('%Y-%m-%d')
+            user_notice = (
+                "🎉 تم تفعيل اشتراكك في Bot Center بنجاح!\\n\\n"
+                f"💎 الخطة: {payload.plan_name}\\n"
+                f"📅 مدة الاشتراك: {payload.duration_days} يوم\\n"
+                f"🗓️ تاريخ الانتهاء: {expiry_text}\\n\\n"
+                "شكراً لثقتك بنا ❤️"
+            )
+        else:
+            user_notice = (
+                "❌ نعتذر، تم رفض طلب الاشتراك في Bot Center.\\n\\n"
+                f"🧾 رقم الطلب: #{payment.id}\\n"
+                "يمكنك مراجعة بيانات الدفع والتواصل مع الدعم إذا كنت تعتقد أن هذا خطأ."
+            )
+        try:
+            async with httpx.AsyncClient(timeout=12) as client:
+                response = await client.post(
+                    f"https://api.telegram.org/bot{settings.telegram_bot_token}/sendMessage",
+                    json={"chat_id": payment.user_id, "text": user_notice},
+                )
+                result = response.json()
+                notification_sent = bool(result.get('ok'))
+                if not notification_sent:
+                    notification_error = result.get('description', 'Telegram delivery failed')
+        except Exception as exc:
+            notification_error = str(exc)[:300]
+
+    return {
+        'id': payment.id,
+        'status': payment.status,
+        'notification_sent': notification_sent,
+        'notification_error': notification_error,
+    }
 
 @app.put('/api/admin/plan')
 def admin_update_plan(payload: PlanUpdate, user: User = Depends(current_user), db: Session = Depends(get_db)):
