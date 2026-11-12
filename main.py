@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     telegram_bot_username: str = "SS_FBot"
     telegram_bot_token: str = ""
     webapp_url: str = ""
+    cron_secret: str = ""
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 
@@ -68,6 +69,8 @@ class Subscription(Base):
     plan_name: Mapped[str] = mapped_column(String(80), default="Free")
     status: Mapped[str] = mapped_column(String(24), default="active")
     expires_at: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    reminder_3d_sent: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    expired_notice_sent: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
 
 
@@ -109,6 +112,29 @@ if engine.dialect.name == "postgresql":
             conn.execute(text("ALTER TABLE managed_bots ADD CONSTRAINT managed_bots_owner_id_fkey FOREIGN KEY (owner_id) REFERENCES users (telegram_id)"))
             conn.execute(text("ALTER TABLE subscriptions ADD CONSTRAINT subscriptions_user_id_fkey FOREIGN KEY (user_id) REFERENCES users (telegram_id)"))
             conn.execute(text("ALTER TABLE payment_requests ADD CONSTRAINT payment_requests_user_id_fkey FOREIGN KEY (user_id) REFERENCES users (telegram_id)"))
+# Add subscription reminder flags to existing databases.
+if engine.dialect.name == "postgresql":
+    with engine.begin() as conn:
+        columns = {
+            row[0] for row in conn.execute(text("""
+                SELECT column_name FROM information_schema.columns
+                WHERE table_schema = current_schema()
+                  AND table_name = 'subscriptions'
+            """)).all()
+        }
+        if "reminder_3d_sent" not in columns:
+            conn.execute(text("ALTER TABLE subscriptions ADD COLUMN reminder_3d_sent BOOLEAN NOT NULL DEFAULT FALSE"))
+        if "expired_notice_sent" not in columns:
+            conn.execute(text("ALTER TABLE subscriptions ADD COLUMN expired_notice_sent BOOLEAN NOT NULL DEFAULT FALSE"))
+elif engine.dialect.name == "sqlite":
+    with engine.begin() as conn:
+        columns = {row[1] for row in conn.execute(text("PRAGMA table_info(subscriptions)")).all()}
+        if "reminder_3d_sent" not in columns:
+            conn.execute(text("ALTER TABLE subscriptions ADD COLUMN reminder_3d_sent BOOLEAN NOT NULL DEFAULT 0"))
+        if "expired_notice_sent" not in columns:
+            conn.execute(text("ALTER TABLE subscriptions ADD COLUMN expired_notice_sent BOOLEAN NOT NULL DEFAULT 0"))
+
+
 app = FastAPI(title=settings.app_name, version="2.0.0")
 app.add_middleware(
     CORSMiddleware,
@@ -395,21 +421,23 @@ async def admin_payment_decision(payment_id: int, payload: PaymentDecision, user
 
     now = int(time.time())
     expires_at = None
-    subscription_start = now
     if payload.approve:
         payment.status = 'approved'
-        current_subscription = db.scalar(
-            select(Subscription)
-            .where(
+        active_subscriptions = db.scalars(
+            select(Subscription).where(
                 Subscription.user_id == payment.user_id,
                 Subscription.status == 'active',
             )
-            .order_by(Subscription.expires_at.desc())
-        )
-        # Add the new period after the current expiry when the user is
-        # already subscribed; otherwise start counting from this approval.
-        if current_subscription and current_subscription.expires_at and current_subscription.expires_at > now:
-            subscription_start = current_subscription.expires_at
+        ).all()
+        future_expiries = [
+            item.expires_at for item in active_subscriptions
+            if item.expires_at and item.expires_at > now
+        ]
+        subscription_start = max(future_expiries, default=now)
+        # Mark previous active records as superseded so old subscriptions
+        # cannot trigger reminders after a renewal has been approved.
+        for item in active_subscriptions:
+            item.status = 'renewed'
         expires_at = subscription_start + payload.duration_days * 86400
         db.add(Subscription(
             user_id=payment.user_id,
@@ -543,6 +571,85 @@ def admin_update_payment_methods(payload: PaymentMethodsUpdate, user: User = Dep
                 row.value = value
     db.commit()
     return {"saved": True}
+
+
+@app.get("/api/cron/subscription-reminders")
+async def subscription_reminders(
+    authorization: str = Header(default="", alias="Authorization"),
+    db: Session = Depends(get_db),
+):
+    if not settings.cron_secret:
+        raise HTTPException(503, "CRON_SECRET is not configured")
+    expected = f"Bearer {settings.cron_secret}"
+    if not hmac.compare_digest(authorization, expected):
+        raise HTTPException(401, "Unauthorized")
+    if not settings.telegram_bot_token:
+        raise HTTPException(503, "Telegram bot is not configured")
+
+    now = int(time.time())
+    candidates = db.scalars(
+        select(Subscription).where(
+            Subscription.status == "active",
+            Subscription.expires_at.is_not(None),
+        )
+    ).all()
+    sent_3d = 0
+    sent_expired = 0
+    failed = 0
+
+    import httpx
+    async with httpx.AsyncClient(timeout=15) as client:
+        for subscription in candidates:
+            expiry = subscription.expires_at
+            if expiry is None:
+                continue
+            if expiry <= now:
+                if subscription.expired_notice_sent:
+                    continue
+                notice = (
+                    "⛔ انتهى اشتراكك في Bot Center\\n\\n"
+                    f"💎 الخطة: {subscription.plan_name}\\n"
+                    "يمكنك تقديم طلب تجديد من داخل المنصة."
+                )
+                subscription.status = "expired"
+                endpoint_flag = "expired_notice_sent"
+            elif expiry <= now + 3 * 86400 and not subscription.reminder_3d_sent:
+                from datetime import datetime, timezone
+                expiry_text = datetime.fromtimestamp(expiry, timezone.utc).strftime("%Y-%m-%d")
+                notice = (
+                    "🔔 تذكير: اشتراكك في Bot Center سينتهي خلال 3 أيام\\n\\n"
+                    f"💎 الخطة: {subscription.plan_name}\\n"
+                    f"🗓️ تاريخ الانتهاء: {expiry_text}\\n"
+                    "جدد اشتراكك قبل انتهائه للاستمرار باستخدام المزايا."
+                )
+                endpoint_flag = "reminder_3d_sent"
+            else:
+                continue
+
+            try:
+                response = await client.post(
+                    f"https://api.telegram.org/bot{settings.telegram_bot_token}/sendMessage",
+                    json={"chat_id": subscription.user_id, "text": notice},
+                )
+                result = response.json()
+                if result.get("ok"):
+                    setattr(subscription, endpoint_flag, True)
+                    if endpoint_flag == "reminder_3d_sent":
+                        sent_3d += 1
+                    else:
+                        sent_expired += 1
+                else:
+                    failed += 1
+            except Exception:
+                failed += 1
+        db.commit()
+
+    return {
+        "ok": True,
+        "reminders_sent": sent_3d,
+        "expired_notices_sent": sent_expired,
+        "failed": failed,
+    }
 
 
 class ContactMessage(BaseModel):
