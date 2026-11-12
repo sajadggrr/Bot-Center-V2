@@ -9,7 +9,7 @@ from fastapi import FastAPI, Depends, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from sqlalchemy import create_engine, String, Integer, Text, Boolean, ForeignKey, select
+from sqlalchemy import create_engine, String, Integer, BigInteger, Text, Boolean, ForeignKey, select, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker, Session
 
 
@@ -45,7 +45,7 @@ class Base(DeclarativeBase):
 
 class User(Base):
     __tablename__ = "users"
-    telegram_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    telegram_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     username: Mapped[str | None] = mapped_column(String(64), nullable=True)
     first_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
     is_banned: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -55,7 +55,7 @@ class User(Base):
 class ManagedBot(Base):
     __tablename__ = "managed_bots"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    owner_id: Mapped[int] = mapped_column(ForeignKey("users.telegram_id"), index=True)
+    owner_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("users.telegram_id"), index=True)
     bot_username: Mapped[str] = mapped_column(String(64))
     token_encrypted: Mapped[str] = mapped_column(Text)
     created_at: Mapped[int] = mapped_column(Integer, default=lambda: int(time.time()))
@@ -64,7 +64,7 @@ class ManagedBot(Base):
 class Subscription(Base):
     __tablename__ = "subscriptions"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    user_id: Mapped[int] = mapped_column(ForeignKey("users.telegram_id"), index=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("users.telegram_id"), index=True)
     plan_name: Mapped[str] = mapped_column(String(80), default="Free")
     status: Mapped[str] = mapped_column(String(24), default="active")
     expires_at: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -88,6 +88,27 @@ class PaymentRequest(Base):
 
 
 Base.metadata.create_all(engine)
+
+# Telegram user IDs can exceed PostgreSQL's 32-bit INTEGER limit.
+# Upgrade existing ID columns safely while preserving all stored rows.
+if engine.dialect.name == "postgresql":
+    with engine.begin() as conn:
+        id_type = conn.execute(text("""
+            SELECT data_type FROM information_schema.columns
+            WHERE table_schema = current_schema()
+              AND table_name = 'users' AND column_name = 'telegram_id'
+        """)).scalar()
+        if id_type == "integer":
+            conn.execute(text("ALTER TABLE managed_bots DROP CONSTRAINT IF EXISTS managed_bots_owner_id_fkey"))
+            conn.execute(text("ALTER TABLE subscriptions DROP CONSTRAINT IF EXISTS subscriptions_user_id_fkey"))
+            conn.execute(text("ALTER TABLE payment_requests DROP CONSTRAINT IF EXISTS payment_requests_user_id_fkey"))
+            conn.execute(text("ALTER TABLE users ALTER COLUMN telegram_id TYPE BIGINT"))
+            conn.execute(text("ALTER TABLE managed_bots ALTER COLUMN owner_id TYPE BIGINT"))
+            conn.execute(text("ALTER TABLE subscriptions ALTER COLUMN user_id TYPE BIGINT"))
+            conn.execute(text("ALTER TABLE payment_requests ALTER COLUMN user_id TYPE BIGINT"))
+            conn.execute(text("ALTER TABLE managed_bots ADD CONSTRAINT managed_bots_owner_id_fkey FOREIGN KEY (owner_id) REFERENCES users (telegram_id)"))
+            conn.execute(text("ALTER TABLE subscriptions ADD CONSTRAINT subscriptions_user_id_fkey FOREIGN KEY (user_id) REFERENCES users (telegram_id)"))
+            conn.execute(text("ALTER TABLE payment_requests ADD CONSTRAINT payment_requests_user_id_fkey FOREIGN KEY (user_id) REFERENCES users (telegram_id)"))
 app = FastAPI(title=settings.app_name, version="2.0.0")
 app.add_middleware(
     CORSMiddleware,
