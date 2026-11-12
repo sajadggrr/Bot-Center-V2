@@ -79,7 +79,7 @@ class PlatformSetting(Base):
 class PaymentRequest(Base):
     __tablename__ = "payment_requests"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    user_id: Mapped[int] = mapped_column(ForeignKey("users.telegram_id"), index=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("users.telegram_id"), index=True)
     method: Mapped[str] = mapped_column(String(32))
     amount: Mapped[str] = mapped_column(String(32))
     reference: Mapped[str | None] = mapped_column(String(128), nullable=True)
