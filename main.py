@@ -353,3 +353,44 @@ def admin_get_plan(user: User = Depends(current_user), db: Session = Depends(get
     values = {r.key: r.value for r in rows}
     return {'name': values.get('plan_name', 'Premium'), 'price': values.get('plan_price', '0'), 'duration_days': int(values.get('plan_duration_days', '30'))}
 
+
+class ContactMessage(BaseModel):
+    message: str = Field(min_length=1, max_length=3000)
+
+
+@app.post("/api/message")
+async def receive_contact_message(
+    payload: ContactMessage,
+    user: User = Depends(current_user),
+):
+    message = payload.message.strip()
+    if not message:
+        raise HTTPException(400, "Message cannot be empty")
+    if not settings.telegram_bot_token:
+        raise HTTPException(503, "Contact bot is not configured")
+
+    full_name = " ".join(part for part in [user.first_name] if part) or "مستخدم تيليجرام"
+    username = f"@{user.username}" if user.username else "بدون يوزر"
+    notice = (
+        "📩 رسالة جديدة من منصة Bot Center\n"
+        f"👤 الاسم: {full_name}\n"
+        f"🔗 الحساب: {username}\n"
+        f"🆔 ID: {user.telegram_id}\n\n"
+        f"📝 الرسالة:\n{message}"
+    )
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            response = await client.post(
+                f"https://api.telegram.org/bot{settings.telegram_bot_token}/sendMessage",
+                json={"chat_id": settings.owner_id, "text": notice},
+            )
+            result = response.json()
+        if not result.get("ok"):
+            raise RuntimeError(result.get("description", "Telegram delivery failed"))
+    except Exception:
+        raise HTTPException(
+            502,
+            "تعذر إيصال الرسالة. تأكد من أن المطوّر بدأ محادثة مع البوت.",
+        )
+    return {"ok": True, "message": "تم إرسال رسالتك بنجاح"}
