@@ -395,9 +395,22 @@ async def admin_payment_decision(payment_id: int, payload: PaymentDecision, user
 
     now = int(time.time())
     expires_at = None
+    subscription_start = now
     if payload.approve:
         payment.status = 'approved'
-        expires_at = now + payload.duration_days * 86400
+        current_subscription = db.scalar(
+            select(Subscription)
+            .where(
+                Subscription.user_id == payment.user_id,
+                Subscription.status == 'active',
+            )
+            .order_by(Subscription.expires_at.desc())
+        )
+        # Add the new period after the current expiry when the user is
+        # already subscribed; otherwise start counting from this approval.
+        if current_subscription and current_subscription.expires_at and current_subscription.expires_at > now:
+            subscription_start = current_subscription.expires_at
+        expires_at = subscription_start + payload.duration_days * 86400
         db.add(Subscription(
             user_id=payment.user_id,
             plan_name=payload.plan_name,
@@ -418,8 +431,8 @@ async def admin_payment_decision(payment_id: int, payload: PaymentDecision, user
             user_notice = (
                 "🎉 تم تفعيل اشتراكك في Bot Center بنجاح!\n\n"
                 f"💎 الخطة: {payload.plan_name}\n"
-                f"📅 مدة الاشتراك: {payload.duration_days} يوم\n"
-                f"🗓️ تاريخ الانتهاء: {expiry_text}\n\n"
+                f"📅 مدة التجديد المضافة: {payload.duration_days} يوم\n"
+                f"🗓️ تاريخ الانتهاء الجديد: {expiry_text}\n\n"
                 "شكراً لثقتك بنا ❤️"
             )
         else:
