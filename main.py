@@ -821,7 +821,7 @@ async def process_telegram_update(update: dict):
                     await telegram_send(
                         chat_id,
                         f"👤 المستخدم: {target.first_name or 'بدون اسم'}\n🆔 {target_id}\nالحالة: {'محظور' if target.is_banned else 'نشط'}",
-                        {"inline_keyboard": [[{"text": "🚫 حظر" if not next_ban else "✅ إلغاء الحظر",
+                        {"inline_keyboard": [[{"text": "🚫 حظر" if next_ban else "✅ إلغاء الحظر",
                                                "callback_data": f"bc:ban:{target_id}:{1 if next_ban else 0}"}],
                                              [{"text": "⬅️ المستخدمون", "callback_data": "bc:users"}]]}
                     )
@@ -887,6 +887,16 @@ async def process_telegram_update(update: dict):
 
         state_key = f"tg_state_{sender_id}"
         state = db.get(PlatformSetting, state_key)
+        if sender_id == settings.owner_id and text_value == "/cancel":
+            if state:
+                db.delete(state)
+                db.commit()
+            await telegram_send(chat_id, "تم إلغاء العملية.", owner_panel_keyboard())
+            try:
+                await telegram_call("deleteMessage", {"chat_id": chat_id, "message_id": message.get("message_id")})
+            except Exception:
+                pass
+            return
         if sender_id == settings.owner_id and state and state.value == "add_bot":
             token = text_value
             if len(token) < 20 or len(token) > 256 or ":" not in token:
@@ -913,6 +923,10 @@ async def process_telegram_update(update: dict):
                     await telegram_send(chat_id, f"✅ تمت إضافة @{username} وحفظ التوكن بصورة مشفّرة.")
                 db.delete(state)
                 db.commit()
+                try:
+                    await telegram_call("deleteMessage", {"chat_id": chat_id, "message_id": message.get("message_id")})
+                except Exception:
+                    pass
             except Exception:
                 await telegram_send(chat_id, "تعذر التحقق من التوكن حالياً. حاول مرة أخرى لاحقاً.")
             return
