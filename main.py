@@ -27,9 +27,14 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+database_url = settings.database_url
+# Neon supplies a standard postgresql:// URL; use the psycopg 3 SQLAlchemy driver.
+if database_url.startswith("postgresql://"):
+    database_url = database_url.replace("postgresql://", "postgresql+psycopg://", 1)
 engine = create_engine(
-    settings.database_url,
-    connect_args={"check_same_thread": False} if settings.database_url.startswith("sqlite") else {},
+    database_url,
+    connect_args={"check_same_thread": False} if database_url.startswith("sqlite") else {},
+    pool_pre_ping=True,
 )
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 
@@ -88,7 +93,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"] if settings.app_env == "development" else ["https://sajadggrr.github.io"],
     allow_credentials=False,
-    allow_methods=["GET", "POST", "DELETE"],
+    allow_methods=["GET", "POST", "PUT", "DELETE"],
     allow_headers=["Content-Type", "X-Telegram-Init-Data"],
 )
 
@@ -272,6 +277,7 @@ def admin_stats(user: User = Depends(current_user), db: Session = Depends(get_db
         "users": len(db.scalars(select(User)).all()),
         "bots": len(db.scalars(select(ManagedBot)).all()),
         "pending_payments": len(db.scalars(select(PaymentRequest).where(PaymentRequest.status == "pending")).all()),
+        "banned_users": len(db.scalars(select(User).where(User.is_banned.is_(True))).all()),
     }
 
 class PlanUpdate(BaseModel):
@@ -347,7 +353,3 @@ def admin_get_plan(user: User = Depends(current_user), db: Session = Depends(get
     values = {r.key: r.value for r in rows}
     return {'name': values.get('plan_name', 'Premium'), 'price': values.get('plan_price', '0'), 'duration_days': int(values.get('plan_duration_days', '30'))}
 
-@app.get('/api/admin/stats')
-def admin_stats(user: User = Depends(current_user), db: Session = Depends(get_db)):
-    require_owner(user)
-    return {'users': len(db.scalars(select(User)).all()), 'bots': len(db.scalars(select(ManagedBot)).all()), 'pending_payments': len(db.scalars(select(PaymentRequest).where(PaymentRequest.status == 'pending')).all()), 'banned_users': len(db.scalars(select(User).where(User.is_banned.is_(True))).all())}
