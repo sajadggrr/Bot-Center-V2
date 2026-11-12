@@ -80,7 +80,7 @@ Base.metadata.create_all(engine)
 app = FastAPI(title=settings.app_name, version="2.0.0")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"] if settings.app_env == "development" else [settings.webapp_url.rstrip("/")],
+    allow_origins=["*"] if settings.app_env == "development" else ["https://sajadggrr.github.io"],
     allow_credentials=False,
     allow_methods=["GET", "POST", "DELETE"],
     allow_headers=["Content-Type", "X-Telegram-Init-Data"],
