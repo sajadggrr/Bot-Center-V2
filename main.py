@@ -65,6 +65,12 @@ class Subscription(Base):
     expires_at: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
+
+class PlatformSetting(Base):
+    __tablename__ = 'platform_settings'
+    key: Mapped[str] = mapped_column(String(80), primary_key=True)
+    value: Mapped[str] = mapped_column(Text, default='')
+
 class PaymentRequest(Base):
     __tablename__ = "payment_requests"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -267,3 +273,81 @@ def admin_stats(user: User = Depends(current_user), db: Session = Depends(get_db
         "bots": len(db.scalars(select(ManagedBot)).all()),
         "pending_payments": len(db.scalars(select(PaymentRequest).where(PaymentRequest.status == "pending")).all()),
     }
+
+class PlanUpdate(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    price: str = Field(min_length=1, max_length=32)
+    duration_days: int = Field(ge=1, le=3650)
+
+class PaymentDecision(BaseModel):
+    approve: bool
+    plan_name: str = Field(default='Premium', min_length=1, max_length=80)
+    duration_days: int = Field(default=30, ge=1, le=3650)
+
+class BanUpdate(BaseModel):
+    banned: bool
+
+def require_owner(user: User):
+    if user.telegram_id != settings.owner_id:
+        raise HTTPException(403, 'Developer access only')
+
+@app.get('/api/admin/users')
+def admin_users(user: User = Depends(current_user), db: Session = Depends(get_db), limit: int = 50, offset: int = 0):
+    require_owner(user)
+    limit = max(1, min(limit, 100))
+    rows = db.scalars(select(User).order_by(User.created_at.desc()).offset(offset).limit(limit)).all()
+    return [{'id': u.telegram_id, 'username': u.username, 'first_name': u.first_name, 'is_banned': u.is_banned, 'created_at': u.created_at} for u in rows]
+
+@app.post('/api/admin/users/{telegram_id}/ban')
+def admin_ban_user(telegram_id: int, payload: BanUpdate, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    require_owner(user)
+    if telegram_id == settings.owner_id: raise HTTPException(400, 'Cannot ban platform owner')
+    target = db.get(User, telegram_id)
+    if not target: raise HTTPException(404, 'User not found')
+    target.is_banned = payload.banned
+    db.commit()
+    return {'user_id': telegram_id, 'is_banned': target.is_banned}
+
+@app.get('/api/admin/payments')
+def admin_payments(user: User = Depends(current_user), db: Session = Depends(get_db), status: str = 'pending'):
+    require_owner(user)
+    if status not in {'pending', 'approved', 'rejected', 'all'}: raise HTTPException(400, 'Invalid status')
+    query = select(PaymentRequest).order_by(PaymentRequest.created_at.desc()).limit(100)
+    if status != 'all': query = query.where(PaymentRequest.status == status)
+    rows = db.scalars(query).all()
+    return [{'id': p.id, 'user_id': p.user_id, 'method': p.method, 'amount': p.amount, 'reference': p.reference, 'status': p.status, 'created_at': p.created_at} for p in rows]
+
+@app.post('/api/admin/payments/{payment_id}/decision')
+def admin_payment_decision(payment_id: int, payload: PaymentDecision, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    require_owner(user)
+    payment = db.get(PaymentRequest, payment_id)
+    if not payment: raise HTTPException(404, 'Payment not found')
+    if payment.status != 'pending': raise HTTPException(409, 'Already reviewed')
+    if payload.approve:
+        payment.status = 'approved'
+        db.add(Subscription(user_id=payment.user_id, plan_name=payload.plan_name, status='active', expires_at=int(time.time()) + payload.duration_days * 86400))
+    else: payment.status = 'rejected'
+    db.commit()
+    return {'id': payment.id, 'status': payment.status}
+
+@app.put('/api/admin/plan')
+def admin_update_plan(payload: PlanUpdate, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    require_owner(user)
+    for key, value in {'plan_name': payload.name, 'plan_price': payload.price, 'plan_duration_days': str(payload.duration_days)}.items():
+        row = db.get(PlatformSetting, key)
+        if row is None: db.add(PlatformSetting(key=key, value=value))
+        else: row.value = value
+    db.commit()
+    return {'saved': True}
+
+@app.get('/api/admin/plan')
+def admin_get_plan(user: User = Depends(current_user), db: Session = Depends(get_db)):
+    require_owner(user)
+    rows = db.scalars(select(PlatformSetting)).all()
+    values = {r.key: r.value for r in rows}
+    return {'name': values.get('plan_name', 'Premium'), 'price': values.get('plan_price', '0'), 'duration_days': int(values.get('plan_duration_days', '30'))}
+
+@app.get('/api/admin/stats')
+def admin_stats(user: User = Depends(current_user), db: Session = Depends(get_db)):
+    require_owner(user)
+    return {'users': len(db.scalars(select(User)).all()), 'bots': len(db.scalars(select(ManagedBot)).all()), 'pending_payments': len(db.scalars(select(PaymentRequest).where(PaymentRequest.status == 'pending')).all()), 'banned_users': len(db.scalars(select(User).where(User.is_banned.is_(True))).all())}
