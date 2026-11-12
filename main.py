@@ -375,6 +375,72 @@ def admin_get_plan(user: User = Depends(current_user), db: Session = Depends(get
     return {'name': values.get('plan_name', 'Premium'), 'price': values.get('plan_price', '0'), 'duration_days': int(values.get('plan_duration_days', '30'))}
 
 
+class PaymentMethodConfig(BaseModel):
+    enabled: bool = False
+    instructions: str = Field(default="", max_length=1500)
+
+
+class PaymentMethodsUpdate(BaseModel):
+    methods: dict[str, PaymentMethodConfig]
+
+
+PAYMENT_METHODS = {
+    "stars": "⭐ نجوم تيليجرام",
+    "asiacell": "📱 آسياسيل",
+    "bank_transfer": "🏦 التحويل البنكي",
+    "card": "💳 الكارت",
+}
+
+
+def read_payment_methods(db: Session):
+    values = {row.key: row.value for row in db.scalars(select(PlatformSetting)).all()}
+    return {
+        key: {
+            "label": label,
+            "enabled": values.get(f"payment_{key}_enabled", "false").lower() == "true",
+            "instructions": values.get(f"payment_{key}_instructions", ""),
+        }
+        for key, label in PAYMENT_METHODS.items()
+    }
+
+
+@app.get("/api/payment-methods")
+def public_payment_methods(db: Session = Depends(get_db)):
+    methods = read_payment_methods(db)
+    return {
+        "methods": {key: {"label": item["label"], "enabled": item["enabled"], "instructions": item["instructions"]}
+                    for key, item in methods.items() if item["enabled"]},
+        "plan": {
+            "name": db.get(PlatformSetting, "plan_name").value if db.get(PlatformSetting, "plan_name") else "Premium",
+            "price": db.get(PlatformSetting, "plan_price").value if db.get(PlatformSetting, "plan_price") else "0",
+        },
+    }
+
+
+@app.get("/api/admin/payment-methods")
+def admin_get_payment_methods(user: User = Depends(current_user), db: Session = Depends(get_db)):
+    require_owner(user)
+    return {"methods": read_payment_methods(db)}
+
+
+@app.put("/api/admin/payment-methods")
+def admin_update_payment_methods(payload: PaymentMethodsUpdate, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    require_owner(user)
+    unknown = set(payload.methods) - set(PAYMENT_METHODS)
+    if unknown:
+        raise HTTPException(400, "Unknown payment method")
+    for key, config in payload.methods.items():
+        for suffix, value in (("enabled", str(config.enabled).lower()), ("instructions", config.instructions.strip())):
+            setting_key = f"payment_{key}_{suffix}"
+            row = db.get(PlatformSetting, setting_key)
+            if row is None:
+                db.add(PlatformSetting(key=setting_key, value=value))
+            else:
+                row.value = value
+    db.commit()
+    return {"saved": True}
+
+
 class ContactMessage(BaseModel):
     message: str = Field(min_length=1, max_length=3000)
 
