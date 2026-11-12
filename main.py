@@ -653,6 +653,313 @@ async def subscription_reminders(
     }
 
 
+# Telegram in-chat developer control panel.
+def telegram_webhook_secret() -> str:
+    return hashlib.sha256(settings.secret_key.encode()).hexdigest()
+
+
+async def telegram_call(method: str, payload: dict):
+    import httpx
+    if not settings.telegram_bot_token:
+        raise HTTPException(503, "Telegram bot token is not configured")
+    async with httpx.AsyncClient(timeout=15) as client:
+        response = await client.post(
+            f"https://api.telegram.org/bot{settings.telegram_bot_token}/{method}",
+            json=payload,
+        )
+        data = response.json()
+    if not data.get("ok"):
+        raise RuntimeError(data.get("description", "Telegram API error"))
+    return data.get("result")
+
+
+def owner_panel_keyboard():
+    return {
+        "inline_keyboard": [
+            [{"text": "🤖 إدارة البوتات", "callback_data": "bc:bots"},
+             {"text": "📊 الإحصائيات", "callback_data": "bc:stats"}],
+            [{"text": "➕ إضافة بوت", "callback_data": "bc:add"},
+             {"text": "💳 طلبات الاشتراك", "callback_data": "bc:payments"}],
+            [{"text": "👥 المستخدمون", "callback_data": "bc:users"},
+             {"text": "💎 إعداد الاشتراك", "callback_data": "bc:plan"}],
+        ]
+    }
+
+
+async def telegram_send(chat_id: int, text_value: str, reply_markup=None):
+    payload = {"chat_id": chat_id, "text": text_value}
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
+    return await telegram_call("sendMessage", payload)
+
+
+async def telegram_show_bots(chat_id: int, owner_id: int, db: Session):
+    rows = db.scalars(
+        select(ManagedBot).where(ManagedBot.owner_id == owner_id).order_by(ManagedBot.id.desc())
+    ).all()
+    if not rows:
+        await telegram_send(chat_id, "🤖 ما عندك بوتات مضافة حالياً.", owner_panel_keyboard())
+        return
+    keyboard = [[{"text": f"🗑 حذف @{b.bot_username}", "callback_data": f"bc:del:{b.id}"}] for b in rows[:30]]
+    keyboard.append([{"text": "➕ إضافة بوت", "callback_data": "bc:add"}])
+    keyboard.append([{"text": "⬅️ القائمة الرئيسية", "callback_data": "bc:home"}])
+    lines = ["🤖 بوتاتك المسجلة في Bot Center:", ""]
+    lines.extend([f"• @{b.bot_username} — رقم {b.id}" for b in rows[:30]])
+    await telegram_send(chat_id, "\n".join(lines), {"inline_keyboard": keyboard})
+
+
+async def telegram_show_users(chat_id: int, db: Session):
+    rows = db.scalars(select(User).order_by(User.created_at.desc()).limit(15)).all()
+    if not rows:
+        await telegram_send(chat_id, "لا يوجد مستخدمون مسجلون.", owner_panel_keyboard())
+        return
+    keyboard = []
+    for item in rows:
+        label = ("🚫 " if item.is_banned else "👤 ") + (item.first_name or str(item.telegram_id))
+        keyboard.append([{"text": label[:60], "callback_data": f"bc:user:{item.telegram_id}"}])
+    keyboard.append([{"text": "⬅️ القائمة الرئيسية", "callback_data": "bc:home"}])
+    await telegram_send(chat_id, "👥 آخر 15 مستخدماً. اختر مستخدماً لإدارة الحظر:", {"inline_keyboard": keyboard})
+
+
+async def telegram_show_payments(chat_id: int, db: Session):
+    rows = db.scalars(
+        select(PaymentRequest).where(PaymentRequest.status == "pending")
+        .order_by(PaymentRequest.created_at.desc()).limit(15)
+    ).all()
+    if not rows:
+        await telegram_send(chat_id, "✅ لا توجد طلبات دفع معلّقة.", owner_panel_keyboard())
+        return
+    keyboard = []
+    for item in rows:
+        keyboard.append([
+            {"text": f"✅ قبول #{item.id}", "callback_data": f"bc:pay:{item.id}:yes"},
+            {"text": f"❌ رفض #{item.id}", "callback_data": f"bc:pay:{item.id}:no"},
+        ])
+    keyboard.append([{"text": "⬅️ القائمة الرئيسية", "callback_data": "bc:home"}])
+    lines = ["💳 طلبات الدفع المعلّقة:", ""]
+    lines.extend([f"#{p.id} | المستخدم {p.user_id} | {p.amount} | {p.method}" for p in rows])
+    await telegram_send(chat_id, "\n".join(lines), {"inline_keyboard": keyboard})
+
+
+async def process_telegram_update(update: dict):
+    message = update.get("message") or {}
+    callback = update.get("callback_query")
+    sender = (callback or {}).get("from") or message.get("from") or {}
+    if not sender.get("id"):
+        return
+    sender_id = int(sender["id"])
+    chat_id = int(((callback or {}).get("message") or message).get("chat", {}).get("id", sender_id))
+    db = SessionLocal()
+    try:
+        user = db.get(User, sender_id)
+        if user is None:
+            user = User(
+                telegram_id=sender_id,
+                username=sender.get("username"),
+                first_name=sender.get("first_name"),
+            )
+            db.add(user)
+            db.commit()
+        elif user.is_banned and sender_id != settings.owner_id:
+            await telegram_send(chat_id, "⛔ حسابك محظور من استخدام Bot Center.")
+            return
+
+        if callback:
+            callback_id = callback.get("id")
+            data = callback.get("data", "")
+            try:
+                await telegram_call("answerCallbackQuery", {"callback_query_id": callback_id})
+            except Exception:
+                pass
+            if sender_id != settings.owner_id:
+                await telegram_send(chat_id, "هذه اللوحة خاصة بالمطوّر.")
+                return
+            if data == "bc:home":
+                await telegram_send(chat_id, "🛡️ لوحة مطوّر Bot Center\nاختر القسم المطلوب:", owner_panel_keyboard())
+            elif data == "bc:bots":
+                await telegram_show_bots(chat_id, sender_id, db)
+            elif data == "bc:add":
+                key = f"tg_state_{sender_id}"
+                row = db.get(PlatformSetting, key)
+                if row is None:
+                    db.add(PlatformSetting(key=key, value="add_bot"))
+                else:
+                    row.value = "add_bot"
+                db.commit()
+                await telegram_send(chat_id, "➕ أرسل الآن توكن البوت من BotFather.\nسيتم التحقق منه وحفظه مشفّراً. لا ترسل أي رمز تحقق أو كلمة مرور.")
+            elif data.startswith("bc:del:"):
+                bot_id = int(data.split(":")[2])
+                bot = db.scalar(select(ManagedBot).where(
+                    ManagedBot.id == bot_id, ManagedBot.owner_id == sender_id
+                ))
+                if not bot:
+                    await telegram_send(chat_id, "لم يتم العثور على البوت.")
+                else:
+                    name = bot.bot_username
+                    db.delete(bot)
+                    db.commit()
+                    await telegram_send(chat_id, f"🗑 تم حذف @{name} من قائمة Bot Center.", owner_panel_keyboard())
+            elif data == "bc:stats":
+                stats = {
+                    "users": len(db.scalars(select(User)).all()),
+                    "bots": len(db.scalars(select(ManagedBot)).all()),
+                    "payments": len(db.scalars(select(PaymentRequest).where(PaymentRequest.status == "pending")).all()),
+                    "banned": len(db.scalars(select(User).where(User.is_banned.is_(True))).all()),
+                }
+                await telegram_send(chat_id, f"📊 إحصائيات Bot Center\n\n👥 المستخدمون: {stats['users']}\n🤖 البوتات: {stats['bots']}\n💳 طلبات الدفع المعلّقة: {stats['payments']}\n🚫 المحظورون: {stats['banned']}", owner_panel_keyboard())
+            elif data == "bc:users":
+                await telegram_show_users(chat_id, db)
+            elif data.startswith("bc:user:"):
+                target_id = int(data.split(":")[2])
+                target = db.get(User, target_id)
+                if not target:
+                    await telegram_send(chat_id, "المستخدم غير موجود.")
+                elif target_id == settings.owner_id:
+                    await telegram_send(chat_id, "لا يمكن حظر حساب المطوّر.")
+                else:
+                    next_ban = not target.is_banned
+                    await telegram_send(
+                        chat_id,
+                        f"👤 المستخدم: {target.first_name or 'بدون اسم'}\n🆔 {target_id}\nالحالة: {'محظور' if target.is_banned else 'نشط'}",
+                        {"inline_keyboard": [[{"text": "🚫 حظر" if not next_ban else "✅ إلغاء الحظر",
+                                               "callback_data": f"bc:ban:{target_id}:{1 if next_ban else 0}"}],
+                                             [{"text": "⬅️ المستخدمون", "callback_data": "bc:users"}]]}
+                    )
+            elif data.startswith("bc:ban:"):
+                _, _, raw_id, raw_state = data.split(":")
+                target_id, banned = int(raw_id), raw_state == "1"
+                target = db.get(User, target_id)
+                if target and target_id != settings.owner_id:
+                    target.is_banned = banned
+                    db.commit()
+                    await telegram_send(chat_id, "تم تحديث حالة المستخدم: " + ("محظور 🚫" if banned else "نشط ✅"), owner_panel_keyboard())
+            elif data == "bc:payments":
+                await telegram_show_payments(chat_id, db)
+            elif data.startswith("bc:pay:"):
+                _, _, raw_id, decision = data.split(":")
+                payment = db.get(PaymentRequest, int(raw_id))
+                if not payment or payment.status != "pending":
+                    await telegram_send(chat_id, "هذا الطلب غير موجود أو تمت مراجعته مسبقاً.")
+                else:
+                    if decision == "yes":
+                        now = int(time.time())
+                        active = db.scalars(select(Subscription).where(
+                            Subscription.user_id == payment.user_id,
+                            Subscription.status == "active"
+                        )).all()
+                        future = [s.expires_at for s in active if s.expires_at and s.expires_at > now]
+                        start_at = max(future, default=now)
+                        plan_row = db.get(PlatformSetting, "plan_name")
+                        days_row = db.get(PlatformSetting, "plan_duration_days")
+                        plan_name = plan_row.value if plan_row else "Premium"
+                        days = int(days_row.value) if days_row else 30
+                        for old in active:
+                            old.status = "renewed"
+                        db.add(Subscription(user_id=payment.user_id, plan_name=plan_name,
+                                            status="active", expires_at=start_at + days * 86400))
+                        payment.status = "approved"
+                        user_text = f"🎉 تم تفعيل اشتراكك في Bot Center!\n💎 الخطة: {plan_name}\n📅 المدة: {days} يوم"
+                    else:
+                        payment.status = "rejected"
+                        user_text = f"❌ تم رفض طلب الاشتراك رقم #{payment.id}."
+                    db.commit()
+                    try:
+                        await telegram_send(payment.user_id, user_text)
+                    except Exception:
+                        pass
+                    await telegram_send(chat_id, f"تمت مراجعة الطلب #{payment.id}: {'مقبول ✅' if decision == 'yes' else 'مرفوض ❌'}", owner_panel_keyboard())
+            elif data == "bc:plan":
+                plan = db.get(PlatformSetting, "plan_name")
+                price = db.get(PlatformSetting, "plan_price")
+                days = db.get(PlatformSetting, "plan_duration_days")
+                await telegram_send(chat_id, f"💎 إعداد الاشتراك الحالي\nالخطة: {plan.value if plan else 'Premium'}\nالسعر: {price.value if price else '0'}\nالمدة: {days.value if days else '30'} يوم\n\nتعديل التفاصيل متاح حالياً من لوحة المطوّر في الموقع.", owner_panel_keyboard())
+            return
+
+        text_value = (message.get("text") or "").strip()
+        if not text_value:
+            return
+        if text_value.startswith("/start") or text_value.startswith("/panel"):
+            if sender_id == settings.owner_id:
+                await telegram_send(chat_id, "🛡️ أهلاً بك في لوحة مطوّر Bot Center\nاختر القسم الذي تريد إدارته:", owner_panel_keyboard())
+            else:
+                await telegram_send(chat_id, "أهلاً بك في Bot Center 🤖\nلإدارة بوتاتك واشتراكاتك افتح تطبيق المنصة من زر القائمة.")
+            return
+
+        state_key = f"tg_state_{sender_id}"
+        state = db.get(PlatformSetting, state_key)
+        if sender_id == settings.owner_id and state and state.value == "add_bot":
+            token = text_value
+            if len(token) < 20 or len(token) > 256 or ":" not in token:
+                await telegram_send(chat_id, "❌ صيغة التوكن غير صحيحة. أرسل توكن BotFather الصحيح أو /cancel للإلغاء.")
+                return
+            try:
+                import httpx
+                async with httpx.AsyncClient(timeout=12) as client:
+                    response = await client.get(f"https://api.telegram.org/bot{token}/getMe")
+                    result = response.json()
+                if not result.get("ok"):
+                    await telegram_send(chat_id, "❌ تيليجرام رفض التوكن. تأكد منه ثم أرسله مرة أخرى.")
+                    return
+                username = result["result"].get("username") or "unknown"
+                existing = db.scalar(select(ManagedBot).where(
+                    ManagedBot.owner_id == sender_id,
+                    ManagedBot.bot_username == username
+                ))
+                if existing:
+                    await telegram_send(chat_id, f"هذا البوت @{username} مضاف مسبقاً.")
+                else:
+                    encrypted = encryptor().encrypt(token.encode()).decode()
+                    db.add(ManagedBot(owner_id=sender_id, bot_username=username, token_encrypted=encrypted))
+                    await telegram_send(chat_id, f"✅ تمت إضافة @{username} وحفظ التوكن بصورة مشفّرة.")
+                db.delete(state)
+                db.commit()
+            except Exception:
+                await telegram_send(chat_id, "تعذر التحقق من التوكن حالياً. حاول مرة أخرى لاحقاً.")
+            return
+        if sender_id == settings.owner_id and text_value == "/cancel":
+            state_key = f"tg_state_{sender_id}"
+            state = db.get(PlatformSetting, state_key)
+            if state:
+                db.delete(state)
+                db.commit()
+            await telegram_send(chat_id, "تم إلغاء العملية.", owner_panel_keyboard())
+    finally:
+        db.close()
+
+
+@app.post("/api/telegram/webhook")
+async def telegram_webhook(
+    update: dict,
+    secret_token: str = Header(default="", alias="X-Telegram-Bot-Api-Secret-Token"),
+):
+    expected = telegram_webhook_secret()
+    if not hmac.compare_digest(secret_token, expected):
+        raise HTTPException(401, "Unauthorized")
+    try:
+        await process_telegram_update(update)
+    except Exception:
+        # Acknowledge the update to avoid Telegram retry storms; details stay server-side.
+        import logging
+        logging.exception("Telegram webhook update failed")
+    return {"ok": True}
+
+
+@app.post("/api/telegram/webhook/setup")
+async def setup_telegram_webhook(user: User = Depends(current_user)):
+    require_owner(user)
+    webhook_url = "https://bot-center-v2.vercel.app/api/telegram/webhook"
+    try:
+        result = await telegram_call("setWebhook", {
+            "url": webhook_url,
+            "secret_token": telegram_webhook_secret(),
+            "allowed_updates": ["message", "callback_query"],
+            "drop_pending_updates": False,
+        })
+        return {"ok": True, "webhook": result}
+    except Exception as exc:
+        raise HTTPException(502, f"تعذر تفعيل لوحة تيليجرام: {str(exc)[:250]}")
+
+
 class ContactMessage(BaseModel):
     message: str = Field(min_length=1, max_length=3000)
 
