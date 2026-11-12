@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     database_url: str = "sqlite:///./bot_center.db"
     bot_token_encryption_key: str = ""
     telegram_bot_username: str = "SS_FBot"
+    telegram_bot_token: str = ""
     webapp_url: str = ""
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
