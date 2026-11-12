@@ -64,6 +64,17 @@ class ManagedBot(Base):
     created_at: Mapped[int] = mapped_column(Integer, default=lambda: int(time.time()))
 
 
+class BotActivity(Base):
+    __tablename__ = "bot_activity"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    owner_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    bot_id: Mapped[int] = mapped_column(Integer, index=True)
+    bot_username: Mapped[str] = mapped_column(String(64))
+    action: Mapped[str] = mapped_column(String(40))
+    details: Mapped[str] = mapped_column(String(500), default="", nullable=False)
+    created_at: Mapped[int] = mapped_column(Integer, default=lambda: int(time.time()), index=True)
+
+
 class Subscription(Base):
     __tablename__ = "subscriptions"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -303,6 +314,8 @@ def add_bot(payload: BotCreate, user: User = Depends(current_user), db: Session 
         token_encrypted=cipher.encrypt(payload.token.encode()).decode(),
     )
     db.add(record)
+    db.flush()
+    db.add(BotActivity(owner_id=user.telegram_id, bot_id=record.id, bot_username=username, action="added", details="تم ربط البوت بحسابك"))
     db.commit()
     db.refresh(record)
     return {"id": record.id, "username": username}
@@ -321,8 +334,24 @@ def update_bot_settings(bot_id: int, payload: BotSettingsUpdate, user: User = De
         raise HTTPException(404, "Bot not found")
     bot.display_name = payload.display_name.strip()
     bot.notes = payload.notes.strip()
+    db.add(BotActivity(owner_id=user.telegram_id, bot_id=bot.id, bot_username=bot.bot_username, action="settings_updated", details="تم تحديث الاسم المخصص والملاحظات"))
     db.commit()
     return {"saved": True, "id": bot.id, "display_name": bot.display_name, "notes": bot.notes}
+
+
+@app.get("/api/bots/{bot_id}/activity")
+def bot_activity(bot_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    bot = db.scalar(select(ManagedBot).where(ManagedBot.id == bot_id, ManagedBot.owner_id == user.telegram_id))
+    if not bot:
+        raise HTTPException(404, "Bot not found")
+    entries = db.scalars(
+        select(BotActivity)
+        .where(BotActivity.owner_id == user.telegram_id, BotActivity.bot_id == bot_id)
+        .order_by(BotActivity.created_at.desc(), BotActivity.id.desc())
+        .limit(30)
+    ).all()
+    labels = {"added": "ربط البوت", "settings_updated": "تحديث الإعدادات"}
+    return [{"id": item.id, "action": labels.get(item.action, item.action), "details": item.details, "created_at": item.created_at} for item in entries]
 
 
 @app.delete("/api/bots/{bot_id}")
