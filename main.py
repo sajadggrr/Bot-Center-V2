@@ -277,7 +277,7 @@ def delete_bot(bot_id: int, user: User = Depends(current_user), db: Session = De
 
 
 @app.post("/api/payments")
-def create_payment(payload: PaymentCreate, user: User = Depends(current_user), db: Session = Depends(get_db)):
+async def create_payment(payload: PaymentCreate, user: User = Depends(current_user), db: Session = Depends(get_db)):
     enabled = db.get(PlatformSetting, f"payment_{payload.method}_enabled")
     if not enabled or enabled.value.lower() != "true":
         raise HTTPException(400, "طريقة الدفع غير متاحة حالياً")
@@ -290,7 +290,44 @@ def create_payment(payload: PaymentCreate, user: User = Depends(current_user), d
     db.add(request)
     db.commit()
     db.refresh(request)
-    return {"id": request.id, "status": request.status}
+
+    method_label = PAYMENT_METHODS.get(payload.method, payload.method)
+    plan_name_row = db.get(PlatformSetting, "plan_name")
+    plan_price_row = db.get(PlatformSetting, "plan_price")
+    duration_row = db.get(PlatformSetting, "plan_duration_days")
+    plan_name = plan_name_row.value if plan_name_row else "Premium"
+    plan_price = plan_price_row.value if plan_price_row else "0"
+    duration_days = duration_row.value if duration_row else "30"
+    full_name = " ".join(part for part in [user.first_name] if part) or "مستخدم تيليجرام"
+    username = f"@{user.username}" if user.username else "بدون يوزر"
+    notice = (
+        "🔔 طلب اشتراك جديد - Bot Center\\n\\n"
+        f"🧾 رقم الطلب: #{request.id}\\n"
+        f"👤 الاسم: {full_name}\\n"
+        f"🔗 الحساب: {username}\\n"
+        f"🆔 الآيدي: {user.telegram_id}\\n\\n"
+        f"💎 الخطة: {plan_name}\\n"
+        f"💰 سعر الخطة المحدد: {plan_price}\\n"
+        f"📅 مدة الاشتراك: {duration_days} يوم\\n"
+        f"💳 طريقة الدفع: {method_label}\\n"
+        f"💵 المبلغ المدخل: {payload.amount}\\n"
+        f"🔖 رقم/مرجع العملية: {payload.reference or 'غير مرفق'}\\n\\n"
+        "⏳ الحالة: بانتظار مراجعة المطوّر"
+    )
+    notification_sent = False
+    if settings.telegram_bot_token:
+        import httpx
+        try:
+            async with httpx.AsyncClient(timeout=12) as client:
+                response = await client.post(
+                    f"https://api.telegram.org/bot{settings.telegram_bot_token}/sendMessage",
+                    json={"chat_id": settings.owner_id, "text": notice},
+                )
+                result = response.json()
+                notification_sent = bool(result.get("ok"))
+        except Exception:
+            notification_sent = False
+    return {"id": request.id, "status": request.status, "notification_sent": notification_sent}
 
 
 @app.get("/api/admin/stats")
