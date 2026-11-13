@@ -631,6 +631,88 @@ async def fadehost_bot_logs(bot_id: str, user: User = Depends(current_user)):
             detail += " | السبب الداخلي: " + " ؛ ".join(safe_parts)
         raise HTTPException(502, detail)
 
+
+@app.get("/api/admin/fadehost/bots/{bot_id}/deployments")
+async def fadehost_bot_deployments(bot_id: str, user: User = Depends(current_user)):
+    """Read-only deployment history for one FadeHost hosted app."""
+    require_owner(user)
+    bot_id = bot_id.strip()
+    if not bot_id.startswith("bot_") or len(bot_id) > 100:
+        raise HTTPException(400, "معرّف تطبيق FadeHost غير صالح")
+    token = (settings.fadehost_token or "").strip()
+    if token.lower().startswith("bearer "):
+        token = token[7:].strip()
+    if not token:
+        raise HTTPException(503, "FadeHost token is not configured")
+
+    stage = "تهيئة اتصال MCP"
+    try:
+        import json
+        import httpx2
+        from mcp import ClientSession
+        from mcp.client.streamable_http import streamable_http_client
+
+        timeout = httpx2.Timeout(30, read=300)
+        headers = {"Authorization": f"Bearer {token}", "X-API-Key": token}
+        async with httpx2.AsyncClient(headers=headers, timeout=timeout) as http_client:
+            async with streamable_http_client(settings.fadehost_mcp_url, http_client=http_client) as (read_stream, write_stream):
+                async with ClientSession(read_stream, write_stream) as session:
+                    stage = "تهيئة جلسة MCP"
+                    await session.initialize()
+                    stage = "فحص أداة سجل النشر"
+                    available = await session.list_tools()
+                    tool = next((item for item in available.tools if item.name == "list_app_deployments"), None)
+                    if tool is None:
+                        raise RuntimeError("أداة list_app_deployments غير متاحة في حساب FadeHost")
+                    schema = tool.inputSchema or {}
+                    properties = schema.get("properties", {})
+                    args = {}
+                    # FadeHost tool versions may name the app identifier differently.
+                    for key in ("bot_id", "app_id", "bot", "id"):
+                        if key in properties:
+                            args[key] = bot_id
+                            break
+                    missing = [key for key in schema.get("required", []) if key not in args]
+                    if missing:
+                        raise RuntimeError("تعذر تحديد مدخلات أداة سجل النشر: " + ", ".join(missing))
+                    stage = "طلب سجل النشر"
+                    result = await session.call_tool("list_app_deployments", args)
+                    if result.is_error:
+                        details = " ".join(block.text for block in (result.content or []) if getattr(block, "type", None) == "text")
+                        raise RuntimeError(details or "فشل تنفيذ أداة list_app_deployments")
+                    stage = "قراءة سجل النشر"
+                    data = result.structured_content
+                    if data is None:
+                        texts = [block.text for block in (result.content or []) if getattr(block, "type", None) == "text"]
+                        if len(texts) == 1:
+                            try:
+                                data = json.loads(texts[0])
+                            except (TypeError, ValueError):
+                                data = texts[0]
+                        else:
+                            data = texts
+                    return {"ok": True, "bot": bot_id, "deployments": data}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        import logging
+        logging.exception("FadeHost list_app_deployments failed at %s (%s)", stage, type(exc).__name__)
+        def deepest_errors(error):
+            if isinstance(error, BaseExceptionGroup):
+                found = []
+                for child in error.exceptions:
+                    found.extend(deepest_errors(child))
+                return found
+            return [error]
+        safe_parts = []
+        for item in deepest_errors(exc)[:4]:
+            message = str(item).replace(token, "[محجوب]").replace("Bearer ", "Bearer [محجوب] ")
+            safe_parts.append(f"{type(item).__name__}: {message[:180]}")
+        detail = f"مرحلة الفشل: {stage} | نوع الخطأ: {type(exc).__name__}"
+        if safe_parts:
+            detail += " | السبب الداخلي: " + " ؛ ".join(safe_parts)
+        raise HTTPException(502, detail)
+
 @app.get('/api/admin/users')
 def admin_users(user: User = Depends(current_user), db: Session = Depends(get_db), limit: int = 50, offset: int = 0):
     require_owner(user)
