@@ -63,6 +63,8 @@ class ManagedBot(Base):
     token_encrypted: Mapped[str] = mapped_column(Text)
     display_name: Mapped[str] = mapped_column(String(80), default="", nullable=False)
     notes: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    runtime_status: Mapped[str] = mapped_column(String(24), default="unknown", nullable=False)
+    last_seen_at: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[int] = mapped_column(Integer, default=lambda: int(time.time()))
 
 
@@ -168,6 +170,26 @@ elif engine.dialect.name == "sqlite":
             conn.execute(text("ALTER TABLE managed_bots ADD COLUMN display_name VARCHAR(80) NOT NULL DEFAULT ''"))
         if "notes" not in columns:
             conn.execute(text("ALTER TABLE managed_bots ADD COLUMN notes TEXT NOT NULL DEFAULT ''"))
+
+
+# Add runtime heartbeat fields to existing managed bot records.
+if engine.dialect.name == "postgresql":
+    with engine.begin() as conn:
+        columns = {row[0] for row in conn.execute(text("""
+            SELECT column_name FROM information_schema.columns
+            WHERE table_schema = current_schema() AND table_name = 'managed_bots'
+        """)).all()}
+        if "runtime_status" not in columns:
+            conn.execute(text("ALTER TABLE managed_bots ADD COLUMN runtime_status VARCHAR(24) NOT NULL DEFAULT 'unknown'"))
+        if "last_seen_at" not in columns:
+            conn.execute(text("ALTER TABLE managed_bots ADD COLUMN last_seen_at INTEGER"))
+elif engine.dialect.name == "sqlite":
+    with engine.begin() as conn:
+        columns = {row[1] for row in conn.execute(text("PRAGMA table_info(managed_bots)")).all()}
+        if "runtime_status" not in columns:
+            conn.execute(text("ALTER TABLE managed_bots ADD COLUMN runtime_status VARCHAR(24) NOT NULL DEFAULT 'unknown'"))
+        if "last_seen_at" not in columns:
+            conn.execute(text("ALTER TABLE managed_bots ADD COLUMN last_seen_at INTEGER"))
 
 
 app = FastAPI(title=settings.app_name, version="2.0.0")
@@ -326,7 +348,28 @@ def add_bot(payload: BotCreate, user: User = Depends(current_user), db: Session 
 @app.get("/api/bots")
 def list_bots(user: User = Depends(current_user), db: Session = Depends(get_db)):
     bots = db.scalars(select(ManagedBot).where(ManagedBot.owner_id == user.telegram_id)).all()
-    return [{"id": b.id, "username": b.bot_username, "display_name": b.display_name or "", "notes": b.notes or "", "created_at": b.created_at, "mode": "external_token", "status": "connected_only"} for b in bots]
+    now = int(time.time())
+    return [{
+        "id": b.id,
+        "username": b.bot_username,
+        "display_name": b.display_name or "",
+        "notes": b.notes or "",
+        "created_at": b.created_at,
+        "mode": "external_token",
+        "status": b.runtime_status if b.last_seen_at and now - b.last_seen_at <= 120 else ("stopped" if b.runtime_status == "stopped" else "unknown"),
+        "last_seen_at": b.last_seen_at,
+    } for b in bots]
+
+
+@app.get("/api/bots/{bot_id}/status")
+def bot_runtime_status(bot_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    bot = db.scalar(select(ManagedBot).where(ManagedBot.id == bot_id, ManagedBot.owner_id == user.telegram_id))
+    if not bot:
+        raise HTTPException(404, "Bot not found")
+    now = int(time.time())
+    fresh = bool(bot.last_seen_at and now - bot.last_seen_at <= 120)
+    status = bot.runtime_status if fresh else ("stopped" if bot.runtime_status == "stopped" else "unknown")
+    return {"id": bot.id, "username": bot.bot_username, "status": status, "last_seen_at": bot.last_seen_at}
 
 
 @app.put("/api/bots/{bot_id}")
