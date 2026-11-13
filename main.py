@@ -516,10 +516,23 @@ async def fadehost_list_bots(user: User = Depends(current_user)):
     except Exception as exc:
         import logging
         logging.exception("FadeHost MCP list_bots failed at %s (%s)", stage, type(exc).__name__)
-        safe_error = str(exc).replace(settings.fadehost_token, "[محجوب]")[:220]
+        def deepest_errors(error):
+            if isinstance(error, BaseExceptionGroup):
+                found = []
+                for child in error.exceptions:
+                    found.extend(deepest_errors(child))
+                return found
+            return [error]
+
+        roots = deepest_errors(exc)
+        safe_parts = []
+        for item in roots[:4]:
+            message = str(item).replace(settings.fadehost_token, "[محجوب]")
+            message = message.replace("Bearer ", "Bearer [محجوب] ")
+            safe_parts.append(f"{type(item).__name__}: {message[:180]}")
         detail = f"مرحلة الفشل: {stage} | نوع الخطأ: {type(exc).__name__}"
-        if safe_error:
-            detail += f" | التفاصيل: {safe_error}"
+        if safe_parts:
+            detail += " | السبب الداخلي: " + " ؛ ".join(safe_parts)
         raise HTTPException(502, detail)
 
 @app.get('/api/admin/users')
