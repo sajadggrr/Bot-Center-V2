@@ -687,7 +687,13 @@ async def fadehost_bot_deployments(bot_id: str, user: User = Depends(current_use
                     if missing:
                         raise RuntimeError("تعذر تحديد مدخلات أداة سجل النشر: " + ", ".join(missing))
                     stage = "طلب سجل النشر"
-                    result = await session.call_tool("list_app_deployments", args)
+                    # Some FadeHost tool schemas reject nullable optional fields (e.g. pinned_commit)
+                    # even though the provider returns null. Disable local schema validation and
+                    # preserve the provider response for display.
+                    try:
+                        result = await session.call_tool("list_app_deployments", args, validate_input=False)
+                    except TypeError:
+                        result = await session.call_tool("list_app_deployments", args)
                     if result.is_error:
                         details = " ".join(block.text for block in (result.content or []) if getattr(block, "type", None) == "text")
                         raise RuntimeError(details or "فشل تنفيذ أداة list_app_deployments")
