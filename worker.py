@@ -4,9 +4,10 @@ import os
 import signal
 import time
 
-from cryptography.fernet import Fernet, InvalidToken
+from cryptography.fernet import Fernet, InvalidToken as DecryptionInvalidToken
 from sqlalchemy import create_engine, text
 from telegram import Update
+from telegram.error import InvalidToken as TelegramInvalidToken
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 logging.basicConfig(
@@ -79,8 +80,10 @@ async def launch_bot(bot_id: int, username: str, encrypted_token: str):
         )
         running[bot_id] = {"app": app, "username": username}
         log.info("Started @%s (record %s)", username, bot_id)
-    except InvalidToken:
+    except DecryptionInvalidToken:
         log.error("Could not decrypt token for bot record %s", bot_id)
+    except TelegramInvalidToken:
+        log.error("Telegram rejected the saved token for bot record %s", bot_id)
     except Exception as exc:
         log.error("Could not start @%s (record %s): %s", username, bot_id, type(exc).__name__)
         try:
