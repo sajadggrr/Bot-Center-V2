@@ -459,7 +459,10 @@ def require_owner(user: User):
 async def fadehost_list_bots(user: User = Depends(current_user)):
     """Read-only FadeHost connection check and hosted-app listing."""
     require_owner(user)
-    if not settings.fadehost_token:
+    token = (settings.fadehost_token or "").strip()
+    if token.lower().startswith("bearer "):
+        token = token[7:].strip()
+    if not token:
         raise HTTPException(503, "FadeHost token is not configured")
 
     stage = "تهيئة اتصال MCP"
@@ -470,7 +473,12 @@ async def fadehost_list_bots(user: User = Depends(current_user)):
         from mcp.client.streamable_http import streamable_http_client
 
         timeout = httpx2.Timeout(30, read=300)
-        headers = {"Authorization": f"Bearer {settings.fadehost_token}"}
+        # FadeHost accepts either Authorization: Bearer or X-API-Key.
+        # Send both forms to support clients/proxies that normalize auth headers differently.
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "X-API-Key": token,
+        }
 
         stage = "الاتصال بخادم FadeHost"
         async with httpx2.AsyncClient(headers=headers, timeout=timeout) as http_client:
@@ -527,7 +535,7 @@ async def fadehost_list_bots(user: User = Depends(current_user)):
         roots = deepest_errors(exc)
         safe_parts = []
         for item in roots[:4]:
-            message = str(item).replace(settings.fadehost_token, "[محجوب]")
+            message = str(item).replace(token, "[محجوب]")
             message = message.replace("Bearer ", "Bearer [محجوب] ")
             safe_parts.append(f"{type(item).__name__}: {message[:180]}")
         detail = f"مرحلة الفشل: {stage} | نوع الخطأ: {type(exc).__name__}"
