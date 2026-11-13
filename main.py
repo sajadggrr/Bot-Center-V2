@@ -543,6 +543,94 @@ async def fadehost_list_bots(user: User = Depends(current_user)):
             detail += " | السبب الداخلي: " + " ؛ ".join(safe_parts)
         raise HTTPException(502, detail)
 
+
+@app.get("/api/admin/fadehost/bots/{bot_id}/logs")
+async def fadehost_bot_logs(bot_id: str, user: User = Depends(current_user)):
+    """Read-only runtime logs for one FadeHost hosted bot."""
+    require_owner(user)
+    bot_id = bot_id.strip()
+    if not bot_id.startswith("bot_") or len(bot_id) > 100:
+        raise HTTPException(400, "معرّف تطبيق FadeHost غير صالح")
+    token = (settings.fadehost_token or "").strip()
+    if token.lower().startswith("bearer "):
+        token = token[7:].strip()
+    if not token:
+        raise HTTPException(503, "FadeHost token is not configured")
+
+    stage = "تهيئة اتصال MCP"
+    try:
+        import json
+        import httpx2
+        from mcp import ClientSession
+        from mcp.client.streamable_http import streamable_http_client
+
+        timeout = httpx2.Timeout(30, read=300)
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "X-API-Key": token,
+        }
+        stage = "الاتصال بخادم FadeHost"
+        async with httpx2.AsyncClient(headers=headers, timeout=timeout) as http_client:
+            async with streamable_http_client(
+                settings.fadehost_mcp_url,
+                http_client=http_client,
+            ) as (read_stream, write_stream):
+                async with ClientSession(read_stream, write_stream) as session:
+                    stage = "تهيئة جلسة MCP"
+                    await session.initialize()
+                    stage = "فحص أداة سجلات FadeHost"
+                    available = await session.list_tools()
+                    tool_names = {tool.name for tool in available.tools}
+                    if "get_bot_logs" not in tool_names:
+                        raise RuntimeError("أداة get_bot_logs غير متاحة في صلاحيات FadeHost الحالية")
+
+                    stage = "طلب سجلات التطبيق"
+                    result = await session.call_tool("get_bot_logs", {"bot": bot_id})
+                    if result.is_error:
+                        details = " ".join(
+                            block.text for block in (result.content or [])
+                            if getattr(block, "type", None) == "text"
+                        )
+                        raise RuntimeError(details or "فشل تنفيذ أداة get_bot_logs")
+
+                    stage = "قراءة السجلات"
+                    data = result.structured_content
+                    if data is None:
+                        texts = [
+                            block.text for block in (result.content or [])
+                            if getattr(block, "type", None) == "text"
+                        ]
+                        if len(texts) == 1:
+                            try:
+                                data = json.loads(texts[0])
+                            except (TypeError, ValueError):
+                                data = texts[0]
+                        else:
+                            data = texts
+                    return {"ok": True, "bot": bot_id, "logs": data}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        import logging
+        logging.exception("FadeHost get_bot_logs failed at %s (%s)", stage, type(exc).__name__)
+        def deepest_errors(error):
+            if isinstance(error, BaseExceptionGroup):
+                found = []
+                for child in error.exceptions:
+                    found.extend(deepest_errors(child))
+                return found
+            return [error]
+
+        safe_parts = []
+        for item in deepest_errors(exc)[:4]:
+            message = str(item).replace(token, "[محجوب]")
+            message = message.replace("Bearer ", "Bearer [محجوب] ")
+            safe_parts.append(f"{type(item).__name__}: {message[:180]}")
+        detail = f"مرحلة الفشل: {stage} | نوع الخطأ: {type(exc).__name__}"
+        if safe_parts:
+            detail += " | السبب الداخلي: " + " ؛ ".join(safe_parts)
+        raise HTTPException(502, detail)
+
 @app.get('/api/admin/users')
 def admin_users(user: User = Depends(current_user), db: Session = Depends(get_db), limit: int = 50, offset: int = 0):
     require_owner(user)
