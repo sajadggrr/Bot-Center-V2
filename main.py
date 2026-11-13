@@ -463,35 +463,56 @@ async def fadehost_list_bots(user: User = Depends(current_user)):
         raise HTTPException(503, "FadeHost token is not configured")
 
     try:
-        from mcp import Client
-        from mcp.client.streamable_http import create_mcp_http_client, streamable_http_client
+        import json
+        import httpx2
+        from mcp import ClientSession
+        from mcp.client.streamable_http import streamable_http_client
 
+        timeout = httpx2.Timeout(30, read=300)
         headers = {"Authorization": f"Bearer {settings.fadehost_token}"}
-        async with create_mcp_http_client(headers=headers) as http_client:
-            transport = streamable_http_client(
+
+        async with httpx2.AsyncClient(headers=headers, timeout=timeout) as http_client:
+            async with streamable_http_client(
                 settings.fadehost_mcp_url,
                 http_client=http_client,
-            )
-            async with Client(transport) as client:
-                result = await client.call_tool("list_bots", {})
-                if result.is_error:
-                    raise RuntimeError("FadeHost list_bots tool returned an error")
+            ) as (read_stream, write_stream):
+                async with ClientSession(read_stream, write_stream) as session:
+                    await session.initialize()
+                    available = await session.list_tools()
+                    tool_names = {tool.name for tool in available.tools}
+                    if "list_bots" not in tool_names:
+                        raise RuntimeError("FadeHost MCP server does not expose list_bots")
 
-                data = result.structured_content
-                if data is None:
-                    data = [
-                        item.text for item in (result.content or [])
-                        if getattr(item, "type", None) == "text"
-                    ]
-                return {"ok": True, "bots": data}
+                    result = await session.call_tool("list_bots", {})
+                    if result.is_error:
+                        details = " ".join(
+                            block.text for block in (result.content or [])
+                            if getattr(block, "type", None) == "text"
+                        )
+                        raise RuntimeError(details or "FadeHost list_bots tool failed")
+
+                    data = result.structured_content
+                    if data is None:
+                        texts = [
+                            block.text for block in (result.content or [])
+                            if getattr(block, "type", None) == "text"
+                        ]
+                        if len(texts) == 1:
+                            try:
+                                data = json.loads(texts[0])
+                            except (TypeError, ValueError):
+                                data = texts
+                        else:
+                            data = texts
+                    return {"ok": True, "bots": data}
     except HTTPException:
         raise
-    except Exception:
+    except Exception as exc:
         import logging
-        logging.exception("FadeHost MCP list_bots request failed")
+        logging.exception("FadeHost MCP list_bots request failed (%s)", type(exc).__name__)
         raise HTTPException(
             502,
-            "تعذر الاتصال بـ FadeHost. تحقق من صلاحية التوكن وإعدادات الخدمة.",
+            "فشل اتصال FadeHost عبر MCP. راجع سجل Vercel لمعرفة السبب؛ لم يتم تغيير أي توكن.",
         )
 
 @app.get('/api/admin/users')
