@@ -664,7 +664,18 @@ async def fadehost_bot_deployments(bot_id: str, user: User = Depends(current_use
                     tool = next((item for item in available.tools if item.name == "list_app_deployments"), None)
                     if tool is None:
                         raise RuntimeError("أداة list_app_deployments غير متاحة في حساب FadeHost")
-                    schema = tool.inputSchema or {}
+                    # MCP SDK versions expose tool schemas with different field names.
+                    schema = getattr(tool, "inputSchema", None) or getattr(tool, "input_schema", None)
+                    if schema is None and hasattr(tool, "model_dump"):
+                        dumped = tool.model_dump(by_alias=True)
+                        schema = dumped.get("inputSchema") or dumped.get("input_schema")
+                    if schema is None and isinstance(tool, dict):
+                        schema = tool.get("inputSchema") or tool.get("input_schema")
+                    if hasattr(schema, "model_dump"):
+                        schema = schema.model_dump(by_alias=True)
+                    elif hasattr(schema, "dict"):
+                        schema = schema.dict(by_alias=True)
+                    schema = schema or {}
                     properties = schema.get("properties", {})
                     args = {}
                     # FadeHost tool versions may name the app identifier differently.
