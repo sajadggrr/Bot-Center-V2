@@ -462,6 +462,7 @@ async def fadehost_list_bots(user: User = Depends(current_user)):
     if not settings.fadehost_token:
         raise HTTPException(503, "FadeHost token is not configured")
 
+    stage = "تهيئة اتصال MCP"
     try:
         import json
         import httpx2
@@ -471,26 +472,31 @@ async def fadehost_list_bots(user: User = Depends(current_user)):
         timeout = httpx2.Timeout(30, read=300)
         headers = {"Authorization": f"Bearer {settings.fadehost_token}"}
 
+        stage = "الاتصال بخادم FadeHost"
         async with httpx2.AsyncClient(headers=headers, timeout=timeout) as http_client:
             async with streamable_http_client(
                 settings.fadehost_mcp_url,
                 http_client=http_client,
             ) as (read_stream, write_stream):
                 async with ClientSession(read_stream, write_stream) as session:
+                    stage = "تهيئة جلسة MCP"
                     await session.initialize()
+                    stage = "فحص أدوات FadeHost"
                     available = await session.list_tools()
                     tool_names = {tool.name for tool in available.tools}
                     if "list_bots" not in tool_names:
-                        raise RuntimeError("FadeHost MCP server does not expose list_bots")
+                        raise RuntimeError("أداة list_bots غير متاحة في حساب FadeHost")
 
+                    stage = "طلب قائمة التطبيقات"
                     result = await session.call_tool("list_bots", {})
                     if result.is_error:
                         details = " ".join(
                             block.text for block in (result.content or [])
                             if getattr(block, "type", None) == "text"
                         )
-                        raise RuntimeError(details or "FadeHost list_bots tool failed")
+                        raise RuntimeError(details or "فشل تنفيذ أداة list_bots")
 
+                    stage = "قراءة نتيجة FadeHost"
                     data = result.structured_content
                     if data is None:
                         texts = [
@@ -509,11 +515,12 @@ async def fadehost_list_bots(user: User = Depends(current_user)):
         raise
     except Exception as exc:
         import logging
-        logging.exception("FadeHost MCP list_bots request failed (%s)", type(exc).__name__)
-        raise HTTPException(
-            502,
-            "فشل اتصال FadeHost عبر MCP. راجع سجل Vercel لمعرفة السبب؛ لم يتم تغيير أي توكن.",
-        )
+        logging.exception("FadeHost MCP list_bots failed at %s (%s)", stage, type(exc).__name__)
+        safe_error = str(exc).replace(settings.fadehost_token, "[محجوب]")[:220]
+        detail = f"مرحلة الفشل: {stage} | نوع الخطأ: {type(exc).__name__}"
+        if safe_error:
+            detail += f" | التفاصيل: {safe_error}"
+        raise HTTPException(502, detail)
 
 @app.get('/api/admin/users')
 def admin_users(user: User = Depends(current_user), db: Session = Depends(get_db), limit: int = 50, offset: int = 0):
