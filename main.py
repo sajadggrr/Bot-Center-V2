@@ -687,12 +687,19 @@ async def fadehost_bot_deployments(bot_id: str, user: User = Depends(current_use
                     if missing:
                         raise RuntimeError("تعذر تحديد مدخلات أداة سجل النشر: " + ", ".join(missing))
                     stage = "طلب سجل النشر"
-                    # FadeHost's advertised output schema marks pinned_commit as a string,
-                    # but its real response may contain null. Skip only this tool's local
-                    # structured-output validation; keep the raw MCP result for display.
+                    # FadeHost advertises pinned_commit as a string but may return null.
+                    # Make that one output field nullable in the SDK's cached validator.
                     output_schemas = getattr(session, "_tool_output_schemas", None)
                     if isinstance(output_schemas, dict):
-                        output_schemas.pop("list_app_deployments", None)
+                        output_schema = output_schemas.get("list_app_deployments")
+                        if isinstance(output_schema, dict):
+                            output_properties = output_schema.get("properties", {})
+                            pinned_schema = output_properties.get("pinned_commit") if isinstance(output_properties, dict) else None
+                            if isinstance(pinned_schema, dict) and pinned_schema.get("type") == "string":
+                                pinned_schema["type"] = ["string", "null"]
+                        validators = getattr(session, "_tool_output_validators", None)
+                        if isinstance(validators, dict):
+                            validators.pop("list_app_deployments", None)
                     result = await session.call_tool("list_app_deployments", args)
                     if result.is_error:
                         details = " ".join(block.text for block in (result.content or []) if getattr(block, "type", None) == "text")
