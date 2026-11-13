@@ -27,7 +27,12 @@
       const [dash,bots]=await Promise.all([api("/api/dashboard"),api("/api/bots")]);
       $("botsCount").textContent=dash.bots_count;
       $("plan").textContent=dash.subscription.plan;
-      $("botList").innerHTML=bots.length?bots.map(b=>'<article class="managed-bot" data-bot="'+b.id+'"><div class="managed-bot-head"><div><b>@'+escapeHtml(b.username)+'</b><small>متصل بالمنصة • نوع الربط: توكن خارجي</small></div><span class="pill">مرتبط</span></div><label>الاسم داخل المنصة</label><input class="bot-name" maxlength="80" value="'+escapeHtml(b.display_name)+'" placeholder="اسم مخصص للبوت"><label>ملاحظات</label><textarea class="bot-notes" maxlength="1000" rows="2" placeholder="اكتب ملاحظاتك عن هذا البوت">'+escapeHtml(b.notes)+'</textarea><div class="bot-actions"><button data-save="'+b.id+'">💾 حفظ</button><button class="secondary" data-activity="'+b.id+'">📜 سجل النشاط</button><button class="danger" data-delete="'+b.id+'">🗑 إزالة</button></div><div class="activity-list" hidden></div></article>').join(""):'<p class="muted">ما عندك بوتات مرتبطة حالياً.</p>';
+      $("botList").innerHTML=bots.length?bots.map(b=>{
+        const liveStatus = b.status === "running" ? '<span class="pill status-running">يعمل الآن</span>' :
+          b.status === "stopped" ? '<span class="pill status-stopped">متوقف</span>' :
+          '<span class="pill status-unknown">مرتبط • فحص التشغيل غير متاح بعد</span>';
+        return '<article class="managed-bot" data-bot="'+b.id+'"><div class="managed-bot-head"><div><b>@'+escapeHtml(b.username)+'</b><small>نوع الربط: توكن خارجي</small></div>'+liveStatus+'</div><p class="hint">حالة الربط تؤكد حفظ البوت في المنصة فقط؛ لن نعرضه كأنه يعمل حتى يصل تأكيد مباشر من عامل التشغيل.</p><label>الاسم داخل المنصة</label><input class="bot-name" maxlength="80" value="'+escapeHtml(b.display_name)+'" placeholder="اسم مخصص للبوت"><label>ملاحظات</label><textarea class="bot-notes" maxlength="1000" rows="2" placeholder="اكتب ملاحظاتك عن هذا البوت">'+escapeHtml(b.notes)+'</textarea><div class="bot-actions"><button data-save="'+b.id+'">💾 حفظ</button><button class="secondary" data-activity="'+b.id+'">📜 سجل النشاط</button><button class="danger" data-delete="'+b.id+'">🗑 إزالة</button></div><div class="activity-list" hidden></div></article>';
+      }).join(""):'<p class="muted">ما عندك بوتات مرتبطة حالياً.</p>';
     } catch(e){notice(e.message,true);}
   }
   $("addBotForm").addEventListener("submit",async e=>{
