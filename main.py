@@ -24,6 +24,8 @@ class Settings(BaseSettings):
     telegram_bot_token: str = ""
     webapp_url: str = ""
     cron_secret: str = ""
+    fadehost_token: str = ""
+    fadehost_mcp_url: str = "https://api.fadehost.com/mcp"
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 
@@ -452,6 +454,45 @@ class BanUpdate(BaseModel):
 def require_owner(user: User):
     if user.telegram_id != settings.owner_id:
         raise HTTPException(403, 'Developer access only')
+
+@app.get("/api/admin/fadehost/bots")
+async def fadehost_list_bots(user: User = Depends(current_user)):
+    """Read-only FadeHost connection check and hosted-app listing."""
+    require_owner(user)
+    if not settings.fadehost_token:
+        raise HTTPException(503, "FadeHost token is not configured")
+
+    try:
+        from mcp import Client
+        from mcp.client.streamable_http import create_mcp_http_client, streamable_http_client
+
+        headers = {"Authorization": f"Bearer {settings.fadehost_token}"}
+        async with create_mcp_http_client(headers=headers) as http_client:
+            transport = streamable_http_client(
+                settings.fadehost_mcp_url,
+                http_client=http_client,
+            )
+            async with Client(transport) as client:
+                result = await client.call_tool("list_bots", {})
+                if result.is_error:
+                    raise RuntimeError("FadeHost list_bots tool returned an error")
+
+                data = result.structured_content
+                if data is None:
+                    data = [
+                        item.text for item in (result.content or [])
+                        if getattr(item, "type", None) == "text"
+                    ]
+                return {"ok": True, "bots": data}
+    except HTTPException:
+        raise
+    except Exception:
+        import logging
+        logging.exception("FadeHost MCP list_bots request failed")
+        raise HTTPException(
+            502,
+            "تعذر الاتصال بـ FadeHost. تحقق من صلاحية التوكن وإعدادات الخدمة.",
+        )
 
 @app.get('/api/admin/users')
 def admin_users(user: User = Depends(current_user), db: Session = Depends(get_db), limit: int = 50, offset: int = 0):
