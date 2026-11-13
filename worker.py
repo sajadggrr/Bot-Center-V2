@@ -34,6 +34,15 @@ running = {}
 stopping = asyncio.Event()
 
 
+def update_runtime(bot_id: int, status: str, seen_at: int | None = None):
+    """Persist worker health without ever reading or exposing the bot token."""
+    with engine.begin() as connection:
+        connection.execute(
+            text("UPDATE managed_bots SET runtime_status = :status, last_seen_at = :seen WHERE id = :bot_id"),
+            {"status": status, "seen": seen_at, "bot_id": bot_id},
+        )
+
+
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     name = context.application.bot.username or "بوتك"
     await update.effective_message.reply_text(
@@ -79,13 +88,20 @@ async def launch_bot(bot_id: int, username: str, encrypted_token: str):
             drop_pending_updates=False,
         )
         running[bot_id] = {"app": app, "username": username}
+        await asyncio.to_thread(update_runtime, bot_id, "running", int(time.time()))
         log.info("Started @%s (record %s)", username, bot_id)
     except DecryptionInvalidToken:
         log.error("Could not decrypt token for bot record %s", bot_id)
+        await asyncio.to_thread(update_runtime, bot_id, "error", None)
     except TelegramInvalidToken:
         log.error("Telegram rejected the saved token for bot record %s", bot_id)
+        await asyncio.to_thread(update_runtime, bot_id, "error", None)
     except Exception as exc:
         log.error("Could not start @%s (record %s): %s", username, bot_id, type(exc).__name__)
+        try:
+            await asyncio.to_thread(update_runtime, bot_id, "error", None)
+        except Exception:
+            log.exception("Could not persist failed runtime status")
         try:
             if "app" in locals():
                 await stop_application(app)
@@ -115,9 +131,14 @@ async def sync_bots():
             await stop_application(item["app"])
             log.info("Stopped removed bot record %s", bot_id)
 
-    # Start newly added bots. Existing processes are left untouched.
+    # Refresh heartbeat for active bots and start newly added records.
     for bot_id, (username, encrypted_token) in records.items():
-        if bot_id not in running:
+        if bot_id in running:
+            try:
+                await asyncio.to_thread(update_runtime, bot_id, "running", int(time.time()))
+            except Exception:
+                log.exception("Could not update heartbeat for bot record %s", bot_id)
+        else:
             await launch_bot(bot_id, username, encrypted_token)
 
 
@@ -132,6 +153,10 @@ async def main():
 
     for bot_id, item in list(running.items()):
         await stop_application(item["app"])
+        try:
+            await asyncio.to_thread(update_runtime, bot_id, "stopped", None)
+        except Exception:
+            log.exception("Could not persist stopped status for bot record %s", bot_id)
         running.pop(bot_id, None)
     engine.dispose()
     log.info("Bot Center worker stopped")
