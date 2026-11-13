@@ -679,7 +679,7 @@ async def fadehost_bot_deployments(bot_id: str, user: User = Depends(current_use
                     properties = schema.get("properties", {})
                     args = {}
                     # FadeHost tool versions may name the app identifier differently.
-                    for key in ("bot_id", "app_id", "bot", "id"):
+                    for key in ("bot_id", "app_id", "bot", "app", "id"):
                         if key in properties:
                             args[key] = bot_id
                             break
