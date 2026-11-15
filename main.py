@@ -1302,6 +1302,31 @@ async def process_telegram_update(update: dict):
                 await telegram_send(chat_id, "أهلاً بك في Bot Center 🤖\\nلإدارة بوتاتك واشتراكاتك افتح تطبيق المنصة من زر القائمة.")
             return
 
+        # Owner-only diagnostic: inspect the configured bot webhook without exposing secrets.
+        if text_value.split()[0].split("@")[0] == "/webhookinfo":
+            if sender_id != settings.owner_id:
+                await telegram_send(chat_id, "هذا الأمر خاص بمالك المنصة.")
+                return
+            try:
+                info = await telegram_call("getWebhookInfo", {})
+                webhook_url = info.get("url") or ""
+                status = "مضبوط" if webhook_url else "غير مضبوط"
+                lines = [
+                    "🔎 حالة اتصال Webhook",
+                    f"الحالة: {status}",
+                    f"العنوان: {webhook_url if webhook_url else 'لا يوجد Webhook حالياً'}",
+                    f"التحديثات المعلقة: {info.get('pending_update_count', 0)}",
+                ]
+                if info.get("last_error_message"):
+                    lines.append(f"آخر خطأ: {info['last_error_message']}")
+                if info.get("last_error_date"):
+                    lines.append(f"وقت آخر خطأ: {info['last_error_date']}")
+                lines.append("لم يتم تغيير أي إعداد أو حذف أي تحديث.")
+                await telegram_send(chat_id, "\\n".join(lines))
+            except Exception:
+                await telegram_send(chat_id, "تعذر قراءة حالة Webhook. لم يتم تغيير أي إعداد.")
+            return
+
         # Owner-only diagnostic: identify the configured Telegram bot without exposing its token.
         if text_value.split()[0].split("@")[0] in {"/botidentity", "/whoami"}:
             if sender_id != settings.owner_id:
