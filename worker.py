@@ -23,7 +23,7 @@ POLL_SECONDS = max(10, int(os.getenv("BOT_WORKER_POLL_SECONDS", "30")))
 # Keep factory-managed bots out of Bot Center polling. Their original service owns updates.
 EXCLUDED_BOT_USERNAMES = {
     name.strip().lstrip("@").lower()
-    for name in os.getenv("BOT_WORKER_EXCLUDED_USERNAMES", "Hsfjvsbot").split(",")
+    for name in os.getenv("BOT_WORKER_EXCLUDED_USERNAMES", "SS_FBot").split(",")
     if name.strip()
 }
 
