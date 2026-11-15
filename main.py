@@ -1072,14 +1072,35 @@ async def telegram_call(method: str, payload: dict):
 def owner_panel_keyboard():
     return {
         "inline_keyboard": [
-            [{"text": "🤖 إدارة البوتات", "callback_data": "bc:bots"},
-             {"text": "📊 الإحصائيات", "callback_data": "bc:stats"}],
-            [{"text": "➕ إضافة بوت", "callback_data": "bc:add"},
-             {"text": "💳 طلبات الاشتراك", "callback_data": "bc:payments"}],
+            [{"text": "⚙️ الإعدادات", "callback_data": "bc:plan"},
+             {"text": "🤖 إدارة البوتات", "callback_data": "bc:bots"}],
             [{"text": "👥 المستخدمون", "callback_data": "bc:users"},
-             {"text": "💎 إعداد الاشتراك", "callback_data": "bc:plan"}],
+             {"text": "💳 المالية والاشتراكات", "callback_data": "bc:payments"}],
+            [{"text": "📊 الإحصائيات", "callback_data": "bc:stats"},
+             {"text": "➕ إضافة بوت", "callback_data": "bc:add"}],
         ]
     }
+
+
+def owner_dashboard_text(db: Session) -> str:
+    users_count = len(db.scalars(select(User)).all())
+    bots_count = len(db.scalars(select(ManagedBot)).all())
+    pending_count = len(db.scalars(select(PaymentRequest).where(PaymentRequest.status == "pending")).all())
+    banned_count = len(db.scalars(select(User).where(User.is_banned.is_(True))).all())
+    today_start = int(time.time()) - 86400
+    new_users = len(db.scalars(select(User).where(User.created_at >= today_start)).all())
+    messages_count = len(db.scalars(select(BotActivity)).all())
+    return (
+        "🤖 لوحة التحكم\n\n"
+        "━━━━ إحصائيات اليوم ━━━━\n"
+        f"👥 إجمالي المستخدمين: {users_count:,}\n"
+        f"🆕 مستخدمون جدد (24 ساعة): {new_users:,}\n"
+        f"🤖 البوتات المرتبطة: {bots_count:,}\n"
+        f"💬 سجلات النشاط: {messages_count:,}\n"
+        f"💳 طلبات الدفع المعلّقة: {pending_count:,}\n"
+        f"🚫 المحظورون: {banned_count:,}\n\n"
+        "اختر القسم المطلوب من الأزرار بالأسفل."
+    )
 
 
 async def telegram_send(chat_id: int, text_value: str, reply_markup=None):
@@ -1275,7 +1296,10 @@ async def process_telegram_update(update: dict):
         if not text_value:
             return
         if text_value.startswith("/start") or text_value.startswith("/panel"):
-            await telegram_send(chat_id, "أهلاً بك في Bot Center 🤖\nلإدارة بوتاتك واشتراكاتك افتح تطبيق المنصة من زر القائمة.")
+            if sender_id == settings.owner_id:
+                await telegram_send(chat_id, owner_dashboard_text(db), owner_panel_keyboard())
+            else:
+                await telegram_send(chat_id, "أهلاً بك في Bot Center 🤖\\nلإدارة بوتاتك واشتراكاتك افتح تطبيق المنصة من زر القائمة.")
             return
 
         state_key = f"tg_state_{sender_id}"
