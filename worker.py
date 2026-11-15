@@ -20,6 +20,13 @@ DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 ENCRYPTION_KEY = os.getenv("BOT_TOKEN_ENCRYPTION_KEY", "").strip()
 POLL_SECONDS = max(10, int(os.getenv("BOT_WORKER_POLL_SECONDS", "30")))
 
+# Keep factory-managed bots out of Bot Center polling. Their original service owns updates.
+EXCLUDED_BOT_USERNAMES = {
+    name.strip().lstrip("@").lower()
+    for name in os.getenv("BOT_WORKER_EXCLUDED_USERNAMES", "Hsfjvsbot").split(",")
+    if name.strip()
+}
+
 if DATABASE_URL.startswith("postgresql://"):
     DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+psycopg://", 1)
 
@@ -124,15 +131,27 @@ async def sync_bots():
         log.exception("Could not read managed bots from database")
         return
 
-    # Stop bots removed from the platform.
+    # Factory-managed bots remain linked in Bot Center but are never polled here.
+    excluded_ids = {
+        bot_id for bot_id, (username, _) in records.items()
+        if username.lstrip("@").lower() in EXCLUDED_BOT_USERNAMES
+    }
+
+    # Stop bots removed from the platform or explicitly excluded from Bot Center runtime.
     for bot_id in list(running):
-        if bot_id not in records:
+        if bot_id not in records or bot_id in excluded_ids:
             item = running.pop(bot_id)
             await stop_application(item["app"])
-            log.info("Stopped removed bot record %s", bot_id)
+            if bot_id in records:
+                await asyncio.to_thread(update_runtime, bot_id, "external", None)
+                log.info("Released @%s to its original external service", item["username"])
+            else:
+                log.info("Stopped removed bot record %s", bot_id)
 
-    # Refresh heartbeat for active bots and start newly added records.
+    # Refresh managed bots; leave factory-managed records untouched by polling.
     for bot_id, (username, encrypted_token) in records.items():
+        if bot_id in excluded_ids:
+            continue
         if bot_id in running:
             try:
                 await asyncio.to_thread(update_runtime, bot_id, "running", int(time.time()))
