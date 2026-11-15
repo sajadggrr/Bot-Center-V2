@@ -1327,6 +1327,36 @@ async def process_telegram_update(update: dict):
                 await telegram_send(chat_id, "تعذر قراءة حالة Webhook. لم يتم تغيير أي إعداد.")
             return
 
+        # Owner-only, guarded release: detach only this project's webhook and preserve queued updates.
+        if text_value.split()[0].split("@")[0] == "/releasewebhook":
+            if sender_id != settings.owner_id:
+                await telegram_send(chat_id, "هذا الأمر خاص بمالك المنصة.")
+                return
+            expected_url = "https://bot-center-v2.vercel.app/api/telegram/webhook"
+            try:
+                current = await telegram_call("getWebhookInfo", {})
+                current_url = current.get("url") or ""
+                if current_url != expected_url:
+                    await telegram_send(
+                        chat_id,
+                        "⛔ لم يتم تغيير أي شيء. عنوان Webhook الحالي لا يطابق عنوان Vercel المتوقع.\\n"
+                        f"العنوان الحالي: {current_url or 'لا يوجد Webhook'}"
+                    )
+                    return
+                await telegram_call("deleteWebhook", {"drop_pending_updates": False})
+                after = await telegram_call("getWebhookInfo", {})
+                remaining = after.get("pending_update_count", 0)
+                await telegram_send(
+                    chat_id,
+                    "✅ تم فصل Webhook الخاص بـ Vercel.\\n"
+                    "لم يتم حذف التحديثات المعلقة، ولم يتم حذف أي مستخدم أو بيانات.\\n"
+                    f"التحديثات المعلقة الآن: {remaining}\\n\\n"
+                    "ملاحظة: هذا يفصل Vercel فقط؛ إعادة ربط البوت بمصنع @mkfrbot تعتمد على آلية المصنع."
+                )
+            except Exception:
+                await telegram_send(chat_id, "❌ تعذر فصل Webhook. لم يتم حذف التحديثات المعلقة أو بيانات البوت.")
+            return
+
         # Owner-only diagnostic: identify the configured Telegram bot without exposing its token.
         if text_value.split()[0].split("@")[0] in {"/botidentity", "/whoami"}:
             if sender_id != settings.owner_id:
