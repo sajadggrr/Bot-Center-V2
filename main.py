@@ -1302,6 +1302,31 @@ async def process_telegram_update(update: dict):
                 await telegram_send(chat_id, "أهلاً بك في Bot Center 🤖\\nلإدارة بوتاتك واشتراكاتك افتح تطبيق المنصة من زر القائمة.")
             return
 
+        # Owner-only diagnostic: identify the configured Telegram bot without exposing its token.
+        if text_value.split()[0].split("@")[0] in {"/botidentity", "/whoami"}:
+            if sender_id != settings.owner_id:
+                await telegram_send(chat_id, "هذا الأمر خاص بمالك المنصة.")
+                return
+            try:
+                bot_info = await telegram_call("getMe", {})
+                username = bot_info.get("username") or "غير متاح"
+                first_name = bot_info.get("first_name") or "غير متاح"
+                bot_id = bot_info.get("id") or "غير متاح"
+                await telegram_send(
+                    chat_id,
+                    "🔎 هوية البوت المضبوط في Vercel\\n"
+                    f"🤖 الاسم: {first_name}\\n"
+                    f"👤 المستخدم: @{username}\\n"
+                    f"🆔 ID: {bot_id}\\n\\n"
+                    "لم يتم عرض التوكن أو تغييره."
+                )
+            except Exception:
+                await telegram_send(
+                    chat_id,
+                    "تعذر التحقق من هوية البوت المضبوط حالياً. لم يتم تغيير أي إعداد."
+                )
+            return
+
         state_key = f"tg_state_{sender_id}"
         state = db.get(PlatformSetting, state_key)
         if sender_id == settings.owner_id and text_value == "/cancel":
